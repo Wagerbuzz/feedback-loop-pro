@@ -34,13 +34,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [role, setRole] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchUserData = async (userId: string) => {
+  const fetchUserData = async (userId: string, userMeta?: Record<string, any>) => {
     const [profileRes, roleRes] = await Promise.all([
-      supabase.from('profiles').select('*').eq('user_id', userId).single(),
-      supabase.from('user_roles').select('role').eq('user_id', userId).single(),
+      supabase.from('profiles').select('*').eq('user_id', userId).maybeSingle(),
+      supabase.from('user_roles').select('role').eq('user_id', userId).maybeSingle(),
     ]);
     if (profileRes.data) setProfile(profileRes.data);
-    if (roleRes.data) setRole(roleRes.data.role);
+
+    if (roleRes.data) {
+      setRole(roleRes.data.role);
+    } else {
+      // Role not yet in DB — insert from user metadata (set during signup)
+      const pendingRole = userMeta?.selected_role || userMeta?.role;
+      if (pendingRole) {
+        const { data: inserted } = await supabase
+          .from('user_roles')
+          .insert({ user_id: userId, role: pendingRole })
+          .select('role')
+          .maybeSingle();
+        if (inserted) setRole(inserted.role);
+      }
+    }
   };
 
   useEffect(() => {
@@ -49,7 +63,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setSession(session);
         setUser(session?.user ?? null);
         if (session?.user) {
-          await fetchUserData(session.user.id);
+          await fetchUserData(session.user.id, session.user.user_metadata);
         } else {
           setProfile(null);
           setRole(null);
@@ -59,11 +73,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     );
 
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        fetchUserData(session.user.id).finally(() => setLoading(false));
-      } else {
+      // onAuthStateChange will handle setLoading(false); avoid duplicate fetch
+      if (!session) {
         setLoading(false);
       }
     });

@@ -30,20 +30,19 @@ export default function Auth() {
     setLoading(true);
 
     if (mode === 'signup') {
-      const { data, error } = await supabase.auth.signUp({
+      const { error } = await supabase.auth.signUp({
         email,
         password,
         options: {
-          data: { full_name: fullName },
+          // Store role in metadata — inserted into user_roles on first authenticated session
+          data: { full_name: fullName, selected_role: role },
           emailRedirectTo: window.location.origin,
         },
       });
       if (error) {
         toast({ title: 'Sign up failed', description: error.message, variant: 'destructive' });
-      } else if (data.user) {
-        // Insert role
-        await supabase.from('user_roles').insert({ user_id: data.user.id, role });
-        toast({ title: 'Account created!', description: 'Check your email to confirm your account.' });
+      } else {
+        toast({ title: 'Account created!', description: 'Check your email to confirm your account, then sign in.' });
       }
     } else {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
