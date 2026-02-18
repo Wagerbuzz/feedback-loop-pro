@@ -1,5 +1,7 @@
 import { useState } from 'react';
+import { Navigate } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
+import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -16,6 +18,7 @@ const ROLES: { value: Role; label: string; desc: string }[] = [
 ];
 
 export default function Auth() {
+  const { user } = useAuth();
   const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -52,6 +55,9 @@ export default function Auth() {
     }
     setLoading(false);
   };
+
+
+  if (user) return <Navigate to="/inbox" replace />;
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
