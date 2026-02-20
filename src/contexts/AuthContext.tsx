@@ -43,17 +43,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     if (roleRes.data) {
       setRole(roleRes.data.role);
-    } else {
-      // Role not yet in DB — insert from user metadata (set during signup)
-      const pendingRole = userMeta?.selected_role || userMeta?.role;
-      if (pendingRole) {
-        const { data: inserted } = await supabase
-          .from('user_roles')
-          .insert({ user_id: userId, role: pendingRole })
-          .select('role')
-          .maybeSingle();
-        if (inserted) setRole(inserted.role);
-      }
     }
   };
 
