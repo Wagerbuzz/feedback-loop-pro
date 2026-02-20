@@ -9,13 +9,6 @@ import { Label } from '@/components/ui/label';
 import { Eye, EyeOff, Zap } from 'lucide-react';
 
 type Mode = 'login' | 'signup';
-type Role = 'pm' | 'cs' | 'exec';
-
-const ROLES: { value: Role; label: string; desc: string }[] = [
-  { value: 'pm', label: 'Product Manager', desc: 'Full workflow access' },
-  { value: 'cs', label: 'Customer Success', desc: 'Feedback + Actions' },
-  { value: 'exec', label: 'Executive', desc: 'Roadmap + Impact view' },
-];
 
 export default function Auth() {
   const { user } = useAuth();
@@ -23,7 +16,6 @@ export default function Auth() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
-  const [role, setRole] = useState<Role>('pm');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const { toast } = useToast();
@@ -38,7 +30,7 @@ export default function Auth() {
         password,
         options: {
           // Store role in metadata — inserted into user_roles on first authenticated session
-          data: { full_name: fullName, selected_role: role },
+          data: { full_name: fullName },
           emailRedirectTo: window.location.origin,
         },
       });
@@ -137,30 +129,6 @@ export default function Auth() {
               </div>
             </div>
 
-            {mode === 'signup' && (
-              <div>
-                <Label className="text-xs text-muted-foreground uppercase tracking-wider">
-                  Your Role
-                </Label>
-                <div className="grid grid-cols-3 gap-2 mt-1.5">
-                  {ROLES.map((r) => (
-                    <button
-                      key={r.value}
-                      type="button"
-                      onClick={() => setRole(r.value)}
-                      className={`p-2.5 rounded-md border text-left transition-colors ${
-                        role === r.value
-                          ? 'border-primary bg-primary/10 text-primary'
-                          : 'border-border bg-muted text-muted-foreground hover:border-muted-foreground'
-                      }`}
-                    >
-                      <div className="text-xs font-medium leading-tight">{r.label}</div>
-                      <div className="text-[10px] mt-0.5 opacity-70">{r.desc}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
 
             <Button type="submit" disabled={loading} className="w-full h-9 text-sm">
               {loading ? 'Please wait…' : mode === 'login' ? 'Sign In' : 'Create Account'}

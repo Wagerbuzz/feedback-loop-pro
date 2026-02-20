@@ -4,23 +4,13 @@ import { useAuth } from '@/contexts/AuthContext';
 import { cn } from '@/lib/utils';
 
 const NAV_ITEMS = [
-  { title: 'Inbox', icon: Inbox, url: '/inbox', roles: ['pm', 'cs', 'exec'] },
-  { title: 'Clusters', icon: GitBranch, url: '/clusters', roles: ['pm', 'cs', 'exec'] },
-  { title: 'Actions', icon: Zap, url: '/actions', roles: ['pm', 'cs'] },
-  { title: 'Roadmap', icon: Map, url: '/roadmap', roles: ['pm', 'exec'] },
-  { title: 'Customer Portal', icon: Users, url: '/portal', roles: ['pm', 'cs', 'exec'] },
+  { title: 'Inbox', icon: Inbox, url: '/inbox' },
+  { title: 'Clusters', icon: GitBranch, url: '/clusters' },
+  { title: 'Actions', icon: Zap, url: '/actions' },
+  { title: 'Roadmap', icon: Map, url: '/roadmap' },
+  { title: 'Customer Portal', icon: Users, url: '/portal' },
 ];
 
-const ROLE_COLORS: Record<string, string> = {
-  pm: 'bg-blue-500/20 text-blue-400',
-  cs: 'bg-green-500/20 text-green-400',
-  exec: 'bg-purple-500/20 text-purple-400',
-};
-const ROLE_LABELS: Record<string, string> = {
-  pm: 'PM',
-  cs: 'CS',
-  exec: 'Exec',
-};
 
 interface Props {
   collapsed: boolean;
@@ -30,11 +20,7 @@ interface Props {
 export default function AppSidebar({ collapsed, onToggle }: Props) {
   const location = useLocation();
   const navigate = useNavigate();
-  const { profile, role, signOut } = useAuth();
-
-  const visibleItems = NAV_ITEMS.filter(
-    (item) => !role || item.roles.includes(role)
-  );
+  const { profile, signOut } = useAuth();
 
   return (
     <aside
@@ -70,7 +56,7 @@ export default function AppSidebar({ collapsed, onToggle }: Props) {
 
       {/* Navigation */}
       <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-        {visibleItems.map((item) => {
+        {NAV_ITEMS.map((item) => {
           const isActive = location.pathname === item.url || (item.url !== '/' && location.pathname.startsWith(item.url));
           return (
             <button
@@ -109,11 +95,6 @@ export default function AppSidebar({ collapsed, onToggle }: Props) {
             </div>
             <div className="flex-1 min-w-0">
               <div className="text-xs font-medium truncate">{profile?.full_name || 'User'}</div>
-              {role && (
-                <span className={cn('text-[10px] px-1.5 py-0.5 rounded font-medium', ROLE_COLORS[role])}>
-                  {ROLE_LABELS[role]}
-                </span>
-              )}
             </div>
             <button
               onClick={signOut}
