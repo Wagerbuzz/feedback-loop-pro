@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Outlet, Navigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import AppSidebar from './AppSidebar';
+import CommandPalette from './CommandPalette';
 
 export default function AppLayout() {
   const { user, loading } = useAuth();
@@ -19,6 +20,7 @@ export default function AppLayout() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
+      <CommandPalette />
       <AppSidebar collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
       <div className="flex-1 flex flex-col overflow-hidden">
         <Outlet />
