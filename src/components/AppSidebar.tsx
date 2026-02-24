@@ -1,9 +1,10 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Inbox, GitBranch, Zap, Map, Users, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Inbox, GitBranch, Zap, Map, Users, ChevronLeft, ChevronRight, LayoutDashboard } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { cn } from '@/lib/utils';
 
 const NAV_ITEMS = [
+  { title: 'Dashboard', icon: LayoutDashboard, url: '/dashboard' },
   { title: 'Inbox', icon: Inbox, url: '/inbox' },
   { title: 'Clusters', icon: GitBranch, url: '/clusters' },
   { title: 'Actions', icon: Zap, url: '/actions' },
