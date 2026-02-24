@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "@/contexts/AuthContext";
 import AppLayout from "@/components/AppLayout";
 import Auth from "@/pages/Auth";
+import DashboardView from "@/pages/DashboardView";
 import InboxView from "@/pages/InboxView";
 import ClustersView from "@/pages/ClustersView";
 import ActionsView from "@/pages/ActionsView";
@@ -25,7 +26,8 @@ const App = () => (
           <Routes>
             <Route path="/auth" element={<Auth />} />
             <Route element={<AppLayout />}>
-              <Route path="/" element={<Navigate to="/inbox" replace />} />
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/dashboard" element={<DashboardView />} />
               <Route path="/inbox" element={<InboxView />} />
               <Route path="/clusters" element={<ClustersView />} />
               <Route path="/actions" element={<ActionsView />} />

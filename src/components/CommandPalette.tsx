@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Inbox, GitBranch, Zap, Map, Users, LogOut } from 'lucide-react';
+import { Inbox, GitBranch, Zap, Map, Users, LogOut, LayoutDashboard } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   CommandDialog,
@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/command';
 
 const NAV_ITEMS = [
+  { title: 'Dashboard', icon: LayoutDashboard, url: '/dashboard', keywords: 'home overview stats' },
   { title: 'Inbox', icon: Inbox, url: '/inbox', keywords: 'feedback messages' },
   { title: 'Clusters', icon: GitBranch, url: '/clusters', keywords: 'groups topics' },
   { title: 'Actions', icon: Zap, url: '/actions', keywords: 'tasks todo' },
