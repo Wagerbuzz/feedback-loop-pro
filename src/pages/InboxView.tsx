@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import TopBar from '@/components/TopBar';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { MessageSquare, Mail, Slack, Headphones, Smartphone, Globe, Plus, Search, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import AddFeedbackDialog from '@/components/AddFeedbackDialog';
@@ -45,6 +46,8 @@ const STATUS_STYLES: Record<string, string> = {
 };
 
 const SOURCES = ['All', 'Intercom', 'Slack', 'Email', 'Zendesk', 'In-App', 'Social'];
+const STATUSES = ['New', 'Clustered', 'Under Review'];
+const SENTIMENTS = ['Positive', 'Negative', 'Neutral'];
 
 export default function InboxView() {
   const [feedback, setFeedback] = useState<Feedback[]>([]);
@@ -54,6 +57,9 @@ export default function InboxView() {
   const [sentimentFilter, setSentimentFilter] = useState('All');
   const [selected, setSelected] = useState<Feedback | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [lastClickedId, setLastClickedId] = useState<string | null>(null);
+  const [bulkUpdating, setBulkUpdating] = useState(false);
   const { toast } = useToast();
 
   const fetchFeedback = async () => {
@@ -78,8 +84,59 @@ export default function InboxView() {
     return matchSource && matchSentiment && matchSearch;
   });
 
+  const allFilteredSelected = filtered.length > 0 && filtered.every((f) => selectedIds.has(f.id));
+  const someFilteredSelected = filtered.some((f) => selectedIds.has(f.id));
+
+  const toggleSelectAll = () => {
+    if (allFilteredSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filtered.map((f) => f.id)));
+    }
+  };
+
+  const handleRowCheckbox = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const next = new Set(selectedIds);
+
+    if (e.shiftKey && lastClickedId) {
+      const lastIdx = filtered.findIndex((f) => f.id === lastClickedId);
+      const curIdx = filtered.findIndex((f) => f.id === id);
+      if (lastIdx !== -1 && curIdx !== -1) {
+        const [start, end] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
+        for (let i = start; i <= end; i++) {
+          next.add(filtered[i].id);
+        }
+      }
+    } else {
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+    }
+
+    setSelectedIds(next);
+    setLastClickedId(id);
+  };
+
+  const bulkUpdate = async (field: 'status' | 'sentiment', value: string) => {
+    setBulkUpdating(true);
+    const ids = [...selectedIds];
+    const { error } = await supabase
+      .from('feedback')
+      .update({ [field]: value })
+      .in('id', ids);
+
+    if (error) {
+      toast({ title: 'Bulk update failed', description: error.message, variant: 'destructive' });
+    } else {
+      toast({ title: `Updated ${ids.length} items`, description: `${field} → ${value}` });
+      setSelectedIds(new Set());
+      await fetchFeedback();
+    }
+    setBulkUpdating(false);
+  };
+
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden relative">
       <TopBar
         title="Feedback Inbox"
         subtitle={`${feedback.length} items`}
@@ -149,6 +206,14 @@ export default function InboxView() {
         <table className="w-full text-xs">
           <thead className="sticky top-0 bg-card border-b border-border z-10">
             <tr>
+              <th className="px-3 py-2 w-10">
+                <Checkbox
+                  checked={allFilteredSelected}
+                  onCheckedChange={toggleSelectAll}
+                  aria-label="Select all"
+                  className={cn(!allFilteredSelected && someFilteredSelected && 'data-[state=unchecked]:bg-primary/30')}
+                />
+              </th>
               <th className="px-3 py-2 text-left text-muted-foreground font-medium w-20">ID</th>
               <th className="px-3 py-2 text-left text-muted-foreground font-medium w-24">Source</th>
               <th className="px-3 py-2 text-left text-muted-foreground font-medium">Feedback</th>
@@ -163,7 +228,7 @@ export default function InboxView() {
             {loading ? (
               Array.from({ length: 8 }).map((_, i) => (
                 <tr key={i} className="border-b border-border">
-                  {Array.from({ length: 8 }).map((_, j) => (
+                  {Array.from({ length: 9 }).map((_, j) => (
                     <td key={j} className="px-3 py-2">
                       <div className="h-3 bg-muted rounded animate-pulse" />
                     </td>
@@ -174,8 +239,19 @@ export default function InboxView() {
               <tr
                 key={f.id}
                 onClick={() => setSelected(f)}
-                className="border-b border-border hover:bg-muted/40 cursor-pointer transition-colors"
+                className={cn(
+                  'border-b border-border hover:bg-muted/40 cursor-pointer transition-colors',
+                  selectedIds.has(f.id) && 'bg-primary/5'
+                )}
               >
+                <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                  <Checkbox
+                    checked={selectedIds.has(f.id)}
+                    onClick={(e) => handleRowCheckbox(f.id, e)}
+                    onCheckedChange={() => {}}
+                    aria-label={`Select ${f.feedback_id}`}
+                  />
+                </td>
                 <td className="px-3 py-2 mono text-muted-foreground">{f.feedback_id}</td>
                 <td className="px-3 py-2">
                   <div className="flex items-center gap-1.5">
@@ -210,6 +286,50 @@ export default function InboxView() {
             No feedback matches your filters
           </div>
         )}
+      </div>
+
+      {/* Floating bulk action bar */}
+      <div
+        className={cn(
+          'absolute bottom-6 left-1/2 -translate-x-1/2 z-30 transition-all duration-200',
+          selectedIds.size > 0
+            ? 'opacity-100 translate-y-0'
+            : 'opacity-0 translate-y-4 pointer-events-none'
+        )}
+      >
+        <div className="flex items-center gap-3 bg-card border border-border rounded-lg shadow-lg px-4 py-2.5">
+          <span className="text-xs font-medium text-foreground whitespace-nowrap">
+            {selectedIds.size} selected
+          </span>
+          <div className="w-px h-5 bg-border" />
+          <Select onValueChange={(v) => bulkUpdate('status', v)} disabled={bulkUpdating}>
+            <SelectTrigger className="h-7 text-xs w-32 bg-muted border-border">
+              <SelectValue placeholder="Set Status" />
+            </SelectTrigger>
+            <SelectContent>
+              {STATUSES.map((s) => (
+                <SelectItem key={s} value={s} className="text-xs">{s}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select onValueChange={(v) => bulkUpdate('sentiment', v)} disabled={bulkUpdating}>
+            <SelectTrigger className="h-7 text-xs w-32 bg-muted border-border">
+              <SelectValue placeholder="Set Sentiment" />
+            </SelectTrigger>
+            <SelectContent>
+              {SENTIMENTS.map((s) => (
+                <SelectItem key={s} value={s} className="text-xs">{s}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="w-px h-5 bg-border" />
+          <button
+            onClick={() => setSelectedIds(new Set())}
+            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+          >
+            <X className="w-3 h-3" /> Deselect
+          </button>
+        </div>
       </div>
 
       {/* Side panel */}
