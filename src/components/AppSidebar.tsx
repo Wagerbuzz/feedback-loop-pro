@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Inbox, GitBranch, Zap, Map, Users, ChevronLeft, ChevronRight, LayoutDashboard } from 'lucide-react';
+import { Inbox, GitBranch, Zap, Map, Users, ChevronLeft, ChevronRight, LayoutDashboard, Settings } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { cn } from '@/lib/utils';
 
@@ -79,7 +79,21 @@ export default function AppSidebar({ collapsed, onToggle }: Props) {
       </nav>
 
       {/* Footer */}
-      <div className="border-t border-sidebar-border p-2 shrink-0">
+      <div className="border-t border-sidebar-border p-2 shrink-0 space-y-1">
+        <button
+          onClick={() => navigate('/settings')}
+          className={cn(
+            'w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md text-sm transition-colors',
+            location.pathname.startsWith('/settings')
+              ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
+              : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          )}
+          title={collapsed ? 'Settings' : undefined}
+        >
+          <Settings className="w-4 h-4 shrink-0" />
+          {!collapsed && <span>Settings</span>}
+        </button>
+
         {collapsed ? (
           <button
             onClick={onToggle}
@@ -89,11 +103,14 @@ export default function AppSidebar({ collapsed, onToggle }: Props) {
           </button>
         ) : (
           <div className="flex items-center gap-2 px-1 py-1">
-            <div className="w-7 h-7 rounded-full bg-primary/20 flex items-center justify-center shrink-0">
+            <button
+              onClick={() => navigate('/settings?tab=profile')}
+              className="w-7 h-7 rounded-full bg-primary/20 flex items-center justify-center shrink-0 hover:ring-1 hover:ring-primary/40 transition-shadow"
+            >
               <span className="text-xs font-medium text-primary">
                 {profile?.avatar_initials || '?'}
               </span>
-            </div>
+            </button>
             <div className="flex-1 min-w-0">
               <div className="text-xs font-medium truncate">{profile?.full_name || 'User'}</div>
             </div>

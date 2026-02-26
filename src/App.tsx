@@ -12,6 +12,7 @@ import ClustersView from "@/pages/ClustersView";
 import ActionsView from "@/pages/ActionsView";
 import RoadmapView from "@/pages/RoadmapView";
 import PortalView from "@/pages/PortalView";
+import SettingsView from "@/pages/SettingsView";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -33,6 +34,7 @@ const App = () => (
               <Route path="/actions" element={<ActionsView />} />
               <Route path="/roadmap" element={<RoadmapView />} />
               <Route path="/portal" element={<PortalView />} />
+              <Route path="/settings" element={<SettingsView />} />
             </Route>
             <Route path="*" element={<NotFound />} />
           </Routes>

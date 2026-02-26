@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Inbox, GitBranch, Zap, Map, Users, LogOut, LayoutDashboard } from 'lucide-react';
+import { Inbox, GitBranch, Zap, Map, Users, LogOut, LayoutDashboard, Settings } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   CommandDialog,
@@ -18,6 +18,7 @@ const NAV_ITEMS = [
   { title: 'Actions', icon: Zap, url: '/actions', keywords: 'tasks todo' },
   { title: 'Roadmap', icon: Map, url: '/roadmap', keywords: 'plan timeline' },
   { title: 'Customer Portal', icon: Users, url: '/portal', keywords: 'customers users' },
+  { title: 'Settings', icon: Settings, url: '/settings', keywords: 'profile integrations notifications preferences' },
 ];
 
 export default function CommandPalette() {
