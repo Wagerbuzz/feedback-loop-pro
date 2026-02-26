@@ -3,6 +3,7 @@ import { Outlet, Navigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import AppSidebar from './AppSidebar';
 import CommandPalette from './CommandPalette';
+import FeedbackAssistant from './FeedbackAssistant';
 
 export default function AppLayout() {
   const { user, loading } = useAuth();
@@ -25,6 +26,7 @@ export default function AppLayout() {
       <div className="flex-1 flex flex-col overflow-hidden">
         <Outlet />
       </div>
+      <FeedbackAssistant />
     </div>
   );
 }
