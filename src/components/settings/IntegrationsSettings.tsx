@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { MessageSquare, Headphones, Hash, FileUp, Code } from 'lucide-react';
+import CompanySetup from './CompanySetup';
 
 const PROVIDERS = [
   { id: 'zendesk', name: 'Zendesk', description: 'Import support tickets', icon: Headphones },
@@ -83,8 +84,11 @@ export default function IntegrationsSettings() {
   };
 
   return (
-    <div className="space-y-6">
-      <div>
+    <div className="space-y-8">
+      {/* Company Setup section */}
+      <CompanySetup />
+
+      <div className="border-t border-border pt-6">
         <h2 className="text-lg font-semibold">Integrations</h2>
         <p className="text-sm text-muted-foreground">Connect your feedback sources to start importing data.</p>
       </div>
