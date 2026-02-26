@@ -22,6 +22,10 @@ interface Feedback {
   status: string;
   cluster_id: string | null;
   channel: string | null;
+  source_url: string | null;
+  pain_point_category: string | null;
+  intent_type: string | null;
+  confidence_score: number | null;
 }
 
 const SOURCE_ICONS: Record<string, React.ReactNode> = {
@@ -31,6 +35,10 @@ const SOURCE_ICONS: Record<string, React.ReactNode> = {
   Zendesk: <Headphones className="w-3.5 h-3.5 text-green-400" />,
   'In-App': <Smartphone className="w-3.5 h-3.5 text-cyan-400" />,
   Social: <Globe className="w-3.5 h-3.5 text-pink-400" />,
+  Reddit: <Globe className="w-3.5 h-3.5 text-orange-400" />,
+  G2: <Globe className="w-3.5 h-3.5 text-red-400" />,
+  TrustRadius: <Globe className="w-3.5 h-3.5 text-blue-400" />,
+  Web: <Globe className="w-3.5 h-3.5 text-muted-foreground" />,
 };
 
 const SENTIMENT_STYLES: Record<string, string> = {
@@ -45,7 +53,7 @@ const STATUS_STYLES: Record<string, string> = {
   'Under Review': 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
 };
 
-const SOURCES = ['All', 'Intercom', 'Slack', 'Email', 'Zendesk', 'In-App', 'Social'];
+const SOURCES = ['All', 'Intercom', 'Slack', 'Email', 'Zendesk', 'In-App', 'Social', 'Reddit', 'G2', 'TrustRadius', 'Web'];
 const STATUSES = ['New', 'Clustered', 'Under Review'];
 const SENTIMENTS = ['Positive', 'Negative', 'Neutral'];
 
@@ -349,6 +357,40 @@ export default function InboxView() {
                 <div className="p-3 bg-muted rounded-md">
                   <p className="text-sm leading-relaxed">"{selected.text}"</p>
                 </div>
+                {/* Pain point & intent badges */}
+                {(selected.pain_point_category || selected.intent_type) && (
+                  <div className="flex gap-1.5 flex-wrap">
+                    {selected.pain_point_category && (
+                      <span className="px-2 py-0.5 rounded border border-border bg-muted text-[10px] font-medium text-muted-foreground">
+                        {selected.pain_point_category}
+                      </span>
+                    )}
+                    {selected.intent_type && (
+                      <span className="px-2 py-0.5 rounded border border-border bg-muted text-[10px] font-medium text-muted-foreground">
+                        {selected.intent_type.replace('_', ' ')}
+                      </span>
+                    )}
+                    {selected.confidence_score != null && (
+                      <span className="px-2 py-0.5 rounded border border-border bg-muted text-[10px] font-medium text-muted-foreground">
+                        {Math.round(selected.confidence_score * 100)}% confidence
+                      </span>
+                    )}
+                  </div>
+                )}
+                {/* Source URL */}
+                {selected.source_url && (
+                  <div>
+                    <div className="text-xs text-muted-foreground mb-1">Source</div>
+                    <a
+                      href={selected.source_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-primary hover:underline break-all"
+                    >
+                      {selected.source_url}
+                    </a>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-3 text-xs">
                   <div>
                     <div className="text-muted-foreground mb-1">Customer</div>

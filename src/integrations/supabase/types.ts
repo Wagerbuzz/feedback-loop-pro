@@ -63,38 +63,165 @@ export type Database = {
         Row: {
           category: string
           cluster_id: string
+          company_id: string | null
           created_at: string
+          description: string | null
           feedback_count: number
+          first_seen_at: string | null
           id: string
+          last_seen_at: string | null
           linked_actions_count: number
           name: string
+          primary_pain_point: string | null
           priority: string
           sentiment: string
+          sentiment_mix: Json
+          severity_score: number
           tags: string[]
+          trend_velocity: number
         }
         Insert: {
           category: string
           cluster_id: string
+          company_id?: string | null
           created_at?: string
+          description?: string | null
           feedback_count?: number
+          first_seen_at?: string | null
           id?: string
+          last_seen_at?: string | null
           linked_actions_count?: number
           name: string
+          primary_pain_point?: string | null
           priority?: string
           sentiment?: string
+          sentiment_mix?: Json
+          severity_score?: number
           tags?: string[]
+          trend_velocity?: number
         }
         Update: {
           category?: string
           cluster_id?: string
+          company_id?: string | null
           created_at?: string
+          description?: string | null
           feedback_count?: number
+          first_seen_at?: string | null
           id?: string
+          last_seen_at?: string | null
           linked_actions_count?: number
           name?: string
+          primary_pain_point?: string | null
           priority?: string
           sentiment?: string
+          sentiment_mix?: Json
+          severity_score?: number
           tags?: string[]
+          trend_velocity?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clusters_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      collection_runs: {
+        Row: {
+          clusters_updated: number
+          company_id: string
+          completed_at: string | null
+          duplicates_skipped: number
+          error_message: string | null
+          id: string
+          new_feedback_count: number
+          started_at: string
+          status: string
+        }
+        Insert: {
+          clusters_updated?: number
+          company_id: string
+          completed_at?: string | null
+          duplicates_skipped?: number
+          error_message?: string | null
+          id?: string
+          new_feedback_count?: number
+          started_at?: string
+          status?: string
+        }
+        Update: {
+          clusters_updated?: number
+          company_id?: string
+          completed_at?: string | null
+          duplicates_skipped?: number
+          error_message?: string | null
+          id?: string
+          new_feedback_count?: number
+          started_at?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "collection_runs_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      companies: {
+        Row: {
+          auto_collect_enabled: boolean
+          brand_terms: Json | null
+          collection_frequency: string
+          created_at: string
+          domain: string
+          feature_terms: Json | null
+          id: string
+          industry_type: string | null
+          last_collected_at: string | null
+          name: string
+          persona_type: string | null
+          product_terms: Json | null
+          search_queries: Json | null
+          user_id: string
+        }
+        Insert: {
+          auto_collect_enabled?: boolean
+          brand_terms?: Json | null
+          collection_frequency?: string
+          created_at?: string
+          domain: string
+          feature_terms?: Json | null
+          id?: string
+          industry_type?: string | null
+          last_collected_at?: string | null
+          name: string
+          persona_type?: string | null
+          product_terms?: Json | null
+          search_queries?: Json | null
+          user_id: string
+        }
+        Update: {
+          auto_collect_enabled?: boolean
+          brand_terms?: Json | null
+          collection_frequency?: string
+          created_at?: string
+          domain?: string
+          feature_terms?: Json | null
+          id?: string
+          industry_type?: string | null
+          last_collected_at?: string | null
+          name?: string
+          persona_type?: string | null
+          product_terms?: Json | null
+          search_queries?: Json | null
+          user_id?: string
         }
         Relationships: []
       }
@@ -126,12 +253,19 @@ export type Database = {
         Row: {
           channel: string | null
           cluster_id: string | null
+          company_id: string | null
+          confidence_score: number | null
+          content_hash: string | null
           created_at: string
           customer_name: string
           feedback_id: string
           id: string
+          intent_type: string | null
+          original_context_excerpt: string | null
+          pain_point_category: string | null
           sentiment: string
           source: string
+          source_url: string | null
           status: string
           text: string
           timestamp: string
@@ -139,12 +273,19 @@ export type Database = {
         Insert: {
           channel?: string | null
           cluster_id?: string | null
+          company_id?: string | null
+          confidence_score?: number | null
+          content_hash?: string | null
           created_at?: string
           customer_name: string
           feedback_id: string
           id?: string
+          intent_type?: string | null
+          original_context_excerpt?: string | null
+          pain_point_category?: string | null
           sentiment?: string
           source: string
+          source_url?: string | null
           status?: string
           text: string
           timestamp?: string
@@ -152,17 +293,32 @@ export type Database = {
         Update: {
           channel?: string | null
           cluster_id?: string | null
+          company_id?: string | null
+          confidence_score?: number | null
+          content_hash?: string | null
           created_at?: string
           customer_name?: string
           feedback_id?: string
           id?: string
+          intent_type?: string | null
+          original_context_excerpt?: string | null
+          pain_point_category?: string | null
           sentiment?: string
           source?: string
+          source_url?: string | null
           status?: string
           text?: string
           timestamp?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "feedback_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       integrations: {
         Row: {

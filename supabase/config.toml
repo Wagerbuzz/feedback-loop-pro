@@ -2,3 +2,9 @@ project_id = "tmeloxtelmoguhgksjuy"
 
 [functions.feedback-assistant]
 verify_jwt = false
+
+[functions.brand-profile]
+verify_jwt = false
+
+[functions.collect-feedback]
+verify_jwt = false
