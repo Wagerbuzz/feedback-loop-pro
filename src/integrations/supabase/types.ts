@@ -164,6 +164,99 @@ export type Database = {
         }
         Relationships: []
       }
+      integrations: {
+        Row: {
+          config: Json
+          connected_at: string | null
+          created_at: string
+          display_name: string
+          id: string
+          provider: string
+          status: string
+          user_id: string
+        }
+        Insert: {
+          config?: Json
+          connected_at?: string | null
+          created_at?: string
+          display_name: string
+          id?: string
+          provider: string
+          status?: string
+          user_id: string
+        }
+        Update: {
+          config?: Json
+          connected_at?: string | null
+          created_at?: string
+          display_name?: string
+          id?: string
+          provider?: string
+          status?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      notification_preferences: {
+        Row: {
+          anomaly_alerts: boolean
+          created_at: string
+          email_digest: boolean
+          id: string
+          user_id: string
+          weekly_summary: boolean
+        }
+        Insert: {
+          anomaly_alerts?: boolean
+          created_at?: string
+          email_digest?: boolean
+          id?: string
+          user_id: string
+          weekly_summary?: boolean
+        }
+        Update: {
+          anomaly_alerts?: boolean
+          created_at?: string
+          email_digest?: boolean
+          id?: string
+          user_id?: string
+          weekly_summary?: boolean
+        }
+        Relationships: []
+      }
+      onboarding_progress: {
+        Row: {
+          action_created: boolean
+          cluster_reviewed: boolean
+          created_at: string
+          dismissed: boolean
+          id: string
+          profile_completed: boolean
+          source_connected: boolean
+          user_id: string
+        }
+        Insert: {
+          action_created?: boolean
+          cluster_reviewed?: boolean
+          created_at?: string
+          dismissed?: boolean
+          id?: string
+          profile_completed?: boolean
+          source_connected?: boolean
+          user_id: string
+        }
+        Update: {
+          action_created?: boolean
+          cluster_reviewed?: boolean
+          created_at?: string
+          dismissed?: boolean
+          id?: string
+          profile_completed?: boolean
+          source_connected?: boolean
+          user_id?: string
+        }
+        Relationships: []
+      }
       profiles: {
         Row: {
           avatar_initials: string

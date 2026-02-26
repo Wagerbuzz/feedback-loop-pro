@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import TopBar from '@/components/TopBar';
+import OnboardingChecklist from '@/components/OnboardingChecklist';
 import { Inbox, GitBranch, Zap, TrendingUp } from 'lucide-react';
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
@@ -89,6 +90,7 @@ export default function DashboardView() {
       <TopBar title="Dashboard" subtitle="Overview of your feedback pipeline" />
 
       <div className="flex-1 overflow-auto p-6 space-y-6">
+        <OnboardingChecklist />
         {/* Stat cards */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {statCards.map((card) => (
