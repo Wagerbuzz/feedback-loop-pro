@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
+import { useCompany } from '@/contexts/CompanyContext';
 import TopBar from '@/components/TopBar';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { ChevronRight, Search, X, ArrowUpRight } from 'lucide-react';
@@ -42,14 +43,19 @@ export default function RoadmapView() {
   const [selected, setSelected] = useState<Initiative | null>(null);
   const [clusterFeedback, setClusterFeedback] = useState<any[]>([]);
   const { toast } = useToast();
+  const { activeCompany } = useCompany();
 
   useEffect(() => {
-    supabase.from('roadmap').select('*').order('initiative_id').then(({ data, error }) => {
+    if (!activeCompany) {
+      setInitiatives([]); setLoading(false); return;
+    }
+    setLoading(true);
+    supabase.from('roadmap').select('*').eq('company_id', activeCompany.id).order('initiative_id').then(({ data, error }) => {
       if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
       else setInitiatives(data || []);
       setLoading(false);
     });
-  }, []);
+  }, [activeCompany?.id]);
 
   const openInitiative = async (init: Initiative) => {
     setSelected(init);

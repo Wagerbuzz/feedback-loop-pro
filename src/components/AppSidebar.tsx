@@ -1,7 +1,15 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Inbox, GitBranch, Zap, Map, Users, ChevronLeft, ChevronRight, LayoutDashboard, Settings } from 'lucide-react';
+import { Inbox, GitBranch, Zap, Map, Users, ChevronLeft, ChevronRight, LayoutDashboard, Settings, ChevronsUpDown, Plus } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { useCompany } from '@/contexts/CompanyContext';
 import { cn } from '@/lib/utils';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 
 const NAV_ITEMS = [
   { title: 'Dashboard', icon: LayoutDashboard, url: '/dashboard' },
@@ -12,7 +20,6 @@ const NAV_ITEMS = [
   { title: 'Customer Portal', icon: Users, url: '/portal' },
 ];
 
-
 interface Props {
   collapsed: boolean;
   onToggle: () => void;
@@ -22,6 +29,7 @@ export default function AppSidebar({ collapsed, onToggle }: Props) {
   const location = useLocation();
   const navigate = useNavigate();
   const { profile, signOut } = useAuth();
+  const { companies, activeCompany, setActiveCompany } = useCompany();
 
   return (
     <aside
@@ -30,29 +38,52 @@ export default function AppSidebar({ collapsed, onToggle }: Props) {
         collapsed ? 'w-14' : 'w-52'
       )}
     >
-      {/* Header */}
-      <div className="flex items-center h-12 px-3 border-b border-sidebar-border shrink-0">
-        {!collapsed && (
-          <div className="flex items-center gap-2 flex-1 min-w-0">
-            <div className="w-6 h-6 rounded bg-primary flex items-center justify-center shrink-0">
-              <Zap className="w-3.5 h-3.5 text-primary-foreground" />
-            </div>
-            <span className="text-sm font-semibold tracking-tight truncate">FeedbackFlow</span>
-          </div>
-        )}
-        {collapsed && (
-          <div className="w-6 h-6 rounded bg-primary flex items-center justify-center mx-auto">
-            <Zap className="w-3.5 h-3.5 text-primary-foreground" />
-          </div>
-        )}
-        {!collapsed && (
-          <button
-            onClick={onToggle}
-            className="ml-auto p-1 rounded hover:bg-sidebar-accent text-muted-foreground hover:text-foreground"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-        )}
+      {/* Header - Brand Switcher */}
+      <div className="border-b border-sidebar-border shrink-0">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className={cn(
+              'w-full flex items-center h-12 px-3 hover:bg-sidebar-accent transition-colors',
+              collapsed ? 'justify-center' : 'gap-2'
+            )}>
+              <div className="w-6 h-6 rounded bg-primary flex items-center justify-center shrink-0">
+                <span className="text-[10px] font-bold text-primary-foreground">
+                  {activeCompany ? activeCompany.name.charAt(0).toUpperCase() : <Zap className="w-3.5 h-3.5" />}
+                </span>
+              </div>
+              {!collapsed && (
+                <>
+                  <span className="text-sm font-semibold tracking-tight truncate flex-1 text-left">
+                    {activeCompany?.name || 'No Company'}
+                  </span>
+                  <ChevronsUpDown className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                </>
+              )}
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-52 bg-popover border-border">
+            {companies.map((c) => (
+              <DropdownMenuItem
+                key={c.id}
+                onClick={() => setActiveCompany(c.id)}
+                className={cn('text-xs gap-2', activeCompany?.id === c.id && 'bg-accent')}
+              >
+                <div className="w-5 h-5 rounded bg-primary/20 flex items-center justify-center shrink-0">
+                  <span className="text-[9px] font-bold text-primary">{c.name.charAt(0).toUpperCase()}</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="truncate font-medium">{c.name}</div>
+                  <div className="text-muted-foreground text-[10px] truncate">{c.domain}</div>
+                </div>
+              </DropdownMenuItem>
+            ))}
+            {companies.length > 0 && <DropdownMenuSeparator />}
+            <DropdownMenuItem onClick={() => navigate('/settings?tab=integrations')} className="text-xs gap-2">
+              <Plus className="w-3.5 h-3.5" />
+              Add Company
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {/* Navigation */}
@@ -114,6 +145,12 @@ export default function AppSidebar({ collapsed, onToggle }: Props) {
             <div className="flex-1 min-w-0">
               <div className="text-xs font-medium truncate">{profile?.full_name || 'User'}</div>
             </div>
+            <button
+              onClick={onToggle}
+              className="p-1 rounded hover:bg-sidebar-accent text-muted-foreground hover:text-foreground"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
             <button
               onClick={signOut}
               className="text-[10px] text-muted-foreground hover:text-foreground shrink-0"

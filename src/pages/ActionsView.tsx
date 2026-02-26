@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
+import { useCompany } from '@/contexts/CompanyContext';
 import TopBar from '@/components/TopBar';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Input } from '@/components/ui/input';
@@ -120,15 +121,20 @@ export default function ActionsView() {
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
   const dragItemId = useRef<string | null>(null);
   const { toast } = useToast();
+  const { activeCompany } = useCompany();
 
   const fetchActions = async () => {
-    const { data, error } = await supabase.from('actions').select('*').order('action_id');
+    if (!activeCompany) {
+      setActions([]); setLoading(false); return;
+    }
+    setLoading(true);
+    const { data, error } = await supabase.from('actions').select('*').eq('company_id', activeCompany.id).order('action_id');
     if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
     else setActions(data || []);
     setLoading(false);
   };
 
-  useEffect(() => { fetchActions(); }, []);
+  useEffect(() => { fetchActions(); }, [activeCompany?.id]);
 
   const updateStatus = async (id: string, status: string) => {
     const { error } = await supabase.from('actions').update({ status }).eq('id', id);
