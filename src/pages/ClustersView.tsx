@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
+import { useCompany } from '@/contexts/CompanyContext';
 import TopBar from '@/components/TopBar';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { ChevronDown, ChevronRight, Search, X } from 'lucide-react';
@@ -46,14 +47,19 @@ export default function ClustersView() {
   const [selected, setSelected] = useState<Cluster | null>(null);
   const [feedbackForCluster, setFeedbackForCluster] = useState<any[]>([]);
   const { toast } = useToast();
+  const { activeCompany } = useCompany();
 
   useEffect(() => {
-    supabase.from('clusters').select('*').order('cluster_id').then(({ data, error }) => {
+    if (!activeCompany) {
+      setClusters([]); setLoading(false); return;
+    }
+    setLoading(true);
+    supabase.from('clusters').select('*').eq('company_id', activeCompany.id).order('cluster_id').then(({ data, error }) => {
       if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
       else setClusters(data || []);
       setLoading(false);
     });
-  }, []);
+  }, [activeCompany?.id]);
 
   const openCluster = async (c: Cluster) => {
     setSelected(c);

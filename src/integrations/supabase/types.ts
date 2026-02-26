@@ -20,6 +20,7 @@ export type Database = {
           ai_suggested: boolean
           cluster_id: string
           cluster_name: string
+          company_id: string | null
           created_at: string
           deadline: string | null
           id: string
@@ -34,6 +35,7 @@ export type Database = {
           ai_suggested?: boolean
           cluster_id: string
           cluster_name: string
+          company_id?: string | null
           created_at?: string
           deadline?: string | null
           id?: string
@@ -48,6 +50,7 @@ export type Database = {
           ai_suggested?: boolean
           cluster_id?: string
           cluster_name?: string
+          company_id?: string | null
           created_at?: string
           deadline?: string | null
           id?: string
@@ -57,7 +60,15 @@ export type Database = {
           status?: string
           suggested_action?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "actions_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       clusters: {
         Row: {
@@ -444,6 +455,7 @@ export type Database = {
         Row: {
           cluster_id: string
           cluster_name: string
+          company_id: string | null
           created_at: string
           id: string
           impact_count: number
@@ -459,6 +471,7 @@ export type Database = {
         Insert: {
           cluster_id: string
           cluster_name: string
+          company_id?: string | null
           created_at?: string
           id?: string
           impact_count?: number
@@ -474,6 +487,7 @@ export type Database = {
         Update: {
           cluster_id?: string
           cluster_name?: string
+          company_id?: string | null
           created_at?: string
           id?: string
           impact_count?: number
@@ -486,7 +500,15 @@ export type Database = {
           status?: string
           title?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "roadmap_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       user_roles: {
         Row: {

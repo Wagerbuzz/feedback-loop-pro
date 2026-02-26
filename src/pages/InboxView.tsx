@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
+import { useCompany } from '@/contexts/CompanyContext';
 import TopBar from '@/components/TopBar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -69,11 +70,19 @@ export default function InboxView() {
   const [lastClickedId, setLastClickedId] = useState<string | null>(null);
   const [bulkUpdating, setBulkUpdating] = useState(false);
   const { toast } = useToast();
+  const { activeCompany } = useCompany();
 
   const fetchFeedback = async () => {
+    if (!activeCompany) {
+      setFeedback([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
     const { data, error } = await supabase
       .from('feedback')
       .select('*')
+      .eq('company_id', activeCompany.id)
       .order('timestamp', { ascending: false });
     if (error) {
       toast({ title: 'Error loading feedback', description: error.message, variant: 'destructive' });
@@ -83,7 +92,7 @@ export default function InboxView() {
     setLoading(false);
   };
 
-  useEffect(() => { fetchFeedback(); }, []);
+  useEffect(() => { fetchFeedback(); }, [activeCompany?.id]);
 
   const filtered = feedback.filter((f) => {
     const matchSource = sourceFilter === 'All' || f.source === sourceFilter;

@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '@/integrations/supabase/client';
+import { useCompany } from '@/contexts/CompanyContext';
 import TopBar from '@/components/TopBar';
 import OnboardingChecklist from '@/components/OnboardingChecklist';
 import { Inbox, GitBranch, Zap, TrendingUp } from 'lucide-react';
@@ -37,13 +38,20 @@ export default function DashboardView() {
   const [clusters, setClusters] = useState<ClusterRow[]>([]);
   const [actions, setActions] = useState<ActionRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const { activeCompany } = useCompany();
 
   useEffect(() => {
+    if (!activeCompany) {
+      setFeedback([]); setClusters([]); setActions([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
     const load = async () => {
       const [fb, cl, ac] = await Promise.all([
-        supabase.from('feedback').select('id, sentiment, timestamp, source'),
-        supabase.from('clusters').select('id, priority'),
-        supabase.from('actions').select('id, status'),
+        supabase.from('feedback').select('id, sentiment, timestamp, source').eq('company_id', activeCompany.id),
+        supabase.from('clusters').select('id, priority').eq('company_id', activeCompany.id),
+        supabase.from('actions').select('id, status').eq('company_id', activeCompany.id),
       ]);
       setFeedback(fb.data ?? []);
       setClusters(cl.data ?? []);
@@ -51,7 +59,7 @@ export default function DashboardView() {
       setLoading(false);
     };
     load();
-  }, []);
+  }, [activeCompany?.id]);
 
   // Sentiment breakdown for pie chart
   const sentimentData = useMemo(() => {
