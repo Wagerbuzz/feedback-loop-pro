@@ -82,6 +82,18 @@ serve(async (req) => {
           const content = result.markdown || "";
           if (content.length < 300) continue;
 
+          const url = result.url || "";
+          const urlLower = url.toLowerCase();
+
+          // URL-level relevance filtering
+          const isOtherProductPage = urlLower.includes('/products/') &&
+            !brandTerms.some((t: string) => urlLower.includes(t.toLowerCase()));
+          const isCategoryPage = urlLower.includes('/categories/');
+          if (isOtherProductPage || isCategoryPage) {
+            console.log(`Skipping irrelevant URL: ${url}`);
+            continue;
+          }
+
           // Check brand mention
           const lowerContent = content.toLowerCase();
           const hasBrandMention = brandTerms.some((t: string) => lowerContent.includes(t.toLowerCase()));
@@ -101,11 +113,11 @@ serve(async (req) => {
                 messages: [
                   {
                     role: "system",
-                    content: `You extract individual customer feedback items from web content about ${company.name}. Extract ONLY genuine user opinions, complaints, praise, or feature requests. Skip marketing copy, author bios, and navigation text. Each item should be a distinct, atomic piece of feedback.`,
+                    content: `You extract individual customer feedback items from web content about ${company.name}. Extract ONLY genuine user opinions, complaints, praise, or feature requests that are DIRECTLY about ${company.name} or its products (${brandTerms.join(', ')}). Do NOT extract reviews about other products even if they appear on the same page. Skip marketing copy, author bios, and navigation text. Every extracted item MUST be directly about ${company.name}. If the page is primarily reviewing a different product, return an empty items array.`,
                   },
                   {
                     role: "user",
-                    content: `Extract feedback items from this page about ${company.name}:\n\nURL: ${result.url}\n\nContent:\n${content.slice(0, 6000)}`,
+                    content: `Extract feedback items ONLY about ${company.name} from this page. Ignore any reviews or opinions about other products:\n\nURL: ${url}\n\nContent:\n${content.slice(0, 6000)}`,
                   },
                 ],
                 tools: [
@@ -125,7 +137,7 @@ serve(async (req) => {
                                 author: { type: "string", description: "Author name or anonymous" },
                                 text: { type: "string", description: "The feedback text (50-300 chars)" },
                                 sentiment: { type: "string", enum: ["Positive", "Negative", "Neutral"] },
-                                confidence: { type: "number", description: "Confidence 0-1" },
+                                confidence: { type: "number", description: "Confidence 0-1 that this feedback is genuinely about " + company.name },
                                 pain_point_category: {
                                   type: "string",
                                   enum: ["UX", "Pricing", "Reliability", "Performance", "Documentation", "Features", "Support", "Security", "Integration", "Other"],
@@ -167,15 +179,23 @@ serve(async (req) => {
             if (!items || !Array.isArray(items)) continue;
 
             // Determine source from URL
-            const url = result.url || "";
             let source = "Web";
-            if (url.includes("reddit.com")) source = "Reddit";
-            else if (url.includes("g2.com")) source = "G2";
-            else if (url.includes("trustradius.com")) source = "TrustRadius";
-            else if (url.includes("capterra.com")) source = "Capterra";
+            if (urlLower.includes("reddit.com")) source = "Reddit";
+            else if (urlLower.includes("g2.com")) source = "G2";
+            else if (urlLower.includes("trustradius.com")) source = "TrustRadius";
+            else if (urlLower.includes("capterra.com")) source = "Capterra";
 
             for (const item of items) {
-              if (!item.text || item.text.length < 20) continue;
+              // Confidence threshold + minimum length
+              if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.7) continue;
+
+              // Post-extraction brand validation: feedback text must mention brand
+              const feedbackLower = item.text.toLowerCase();
+              const mentionsBrand = brandTerms.some((t: string) => feedbackLower.includes(t.toLowerCase()));
+              if (!mentionsBrand && (item.confidence || 0) < 0.9) {
+                console.log(`Skipping feedback not mentioning brand: "${item.text.slice(0, 60)}..."`);
+                continue;
+              }
               const contentHash = await hashText(item.text);
 
               const feedbackRow = {
