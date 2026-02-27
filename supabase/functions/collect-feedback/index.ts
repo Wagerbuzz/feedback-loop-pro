@@ -302,7 +302,24 @@ async function collectTwitterFeedback(
   }
 
   const brandName = brandTerms[0] || company.name;
-  const query = `"${brandName}" -is:retweet lang:en`;
+
+  // Build disambiguated Twitter search query using product terms and industry
+  const productTerms = (company.product_terms || []).slice(0, 3);
+  const industryType = company.industry_type || "";
+  const contextTerms = [
+    ...productTerms.map((t: string) => t.split(" ").pop()),
+    industryType,
+  ].filter(Boolean).slice(0, 3);
+
+  let query: string;
+  if (contextTerms.length > 0) {
+    const orClauses = contextTerms.map((t: string) => `("${brandName}" ${t})`);
+    if (company.domain) orClauses.push(`(${company.domain})`);
+    query = `(${orClauses.join(" OR ")}) -is:retweet lang:en`;
+  } else {
+    query = `"${brandName}" -is:retweet lang:en`;
+  }
+  console.log(`Twitter search query: ${query}`);
 
   try {
     // Search recent tweets
@@ -335,7 +352,7 @@ async function collectTwitterFeedback(
           messages: [
             {
               role: "system",
-              content: `Extract customer feedback from tweets about ${company.name}. Only extract tweets that contain genuine opinions, complaints, praise, or feature requests DIRECTLY about ${company.name}. Skip promotional tweets, ads, and bot content.`,
+              content: `Extract customer feedback from tweets about ${company.name} (${company.domain}), a ${company.industry_type || "software"} product. Only extract tweets about THIS specific product, not other products that share the same name. Skip tweets about unrelated products, promotional tweets, ads, and bot content.`,
             },
             { role: "user", content: `Extract feedback from these tweets about ${company.name}:\n\n${tweetTexts}` },
           ],
@@ -394,7 +411,13 @@ async function collectTwitterFeedback(
       if (!items || !Array.isArray(items)) continue;
 
       for (const item of items) {
-        if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.7) continue;
+        if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.8) continue;
+
+        // Post-extraction brand validation: check feedback mentions brand-relevant terms
+        const feedbackLower = item.text.toLowerCase();
+        const allValidationTerms = [...brandTerms, ...(company.product_terms || []), company.domain].filter(Boolean);
+        const mentionsBrand = allValidationTerms.some((t: string) => feedbackLower.includes(t.toLowerCase()));
+        if (!mentionsBrand && (item.confidence || 0) < 0.85) continue;
 
         const tweetIdx = (item.tweet_index || 1) - 1;
         const tweet = batch[tweetIdx];
