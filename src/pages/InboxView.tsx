@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { useCompany } from '@/contexts/CompanyContext';
@@ -8,9 +8,12 @@ import { Input } from '@/components/ui/input';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { MessageSquare, Mail, Slack, Headphones, Smartphone, Globe, Plus, Search, X } from 'lucide-react';
+import { MessageSquare, Mail, Slack, Headphones, Smartphone, Globe, Plus, Search, X, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import AddFeedbackDialog from '@/components/AddFeedbackDialog';
+
+type SortField = 'feedback_id' | 'source' | 'text' | 'customer_name' | 'timestamp' | 'sentiment' | 'status' | 'cluster_id';
+type SortDir = 'asc' | 'desc';
 
 interface Feedback {
   id: string;
@@ -69,6 +72,8 @@ export default function InboxView() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [lastClickedId, setLastClickedId] = useState<string | null>(null);
   const [bulkUpdating, setBulkUpdating] = useState(false);
+  const [sortField, setSortField] = useState<SortField>('timestamp');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
   const { toast } = useToast();
   const { activeCompany } = useCompany();
 
@@ -94,12 +99,37 @@ export default function InboxView() {
 
   useEffect(() => { fetchFeedback(); }, [activeCompany?.id]);
 
-  const filtered = feedback.filter((f) => {
-    const matchSource = sourceFilter === 'All' || f.source === sourceFilter;
-    const matchSentiment = sentimentFilter === 'All' || f.sentiment === sentimentFilter;
-    const matchSearch = !search || f.text.toLowerCase().includes(search.toLowerCase()) || f.customer_name.toLowerCase().includes(search.toLowerCase());
-    return matchSource && matchSentiment && matchSearch;
-  });
+  const filtered = useMemo(() => {
+    const list = feedback.filter((f) => {
+      const matchSource = sourceFilter === 'All' || f.source === sourceFilter;
+      const matchSentiment = sentimentFilter === 'All' || f.sentiment === sentimentFilter;
+      const matchSearch = !search || f.text.toLowerCase().includes(search.toLowerCase()) || f.customer_name.toLowerCase().includes(search.toLowerCase());
+      return matchSource && matchSentiment && matchSearch;
+    });
+    list.sort((a, b) => {
+      const aVal = a[sortField] ?? '';
+      const bVal = b[sortField] ?? '';
+      const cmp = typeof aVal === 'number' && typeof bVal === 'number'
+        ? aVal - bVal
+        : String(aVal).localeCompare(String(bVal));
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+    return list;
+  }, [feedback, sourceFilter, sentimentFilter, search, sortField, sortDir]);
+
+  const toggleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortField(field);
+      setSortDir('asc');
+    }
+  };
+
+  const SortIcon = ({ field }: { field: SortField }) => {
+    if (sortField !== field) return <ArrowUpDown className="w-3 h-3 opacity-40" />;
+    return sortDir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />;
+  };
 
   const allFilteredSelected = filtered.length > 0 && filtered.every((f) => selectedIds.has(f.id));
   const someFilteredSelected = filtered.some((f) => selectedIds.has(f.id));
@@ -155,7 +185,7 @@ export default function InboxView() {
   return (
     <div className="flex flex-col h-full overflow-hidden relative">
       <TopBar
-        title="Feedback Inbox"
+        title="Feedback"
         subtitle={`${feedback.length} items`}
         actions={
           <Button size="sm" className="h-7 text-xs gap-1.5" onClick={() => setShowAdd(true)}>
@@ -231,14 +261,30 @@ export default function InboxView() {
                   className={cn(!allFilteredSelected && someFilteredSelected && 'data-[state=unchecked]:bg-primary/30')}
                 />
               </th>
-              <th className="px-3 py-2 text-left text-muted-foreground font-medium w-20">ID</th>
-              <th className="px-3 py-2 text-left text-muted-foreground font-medium w-24">Source</th>
-              <th className="px-3 py-2 text-left text-muted-foreground font-medium">Feedback</th>
-              <th className="px-3 py-2 text-left text-muted-foreground font-medium w-32">Customer</th>
-              <th className="px-3 py-2 text-left text-muted-foreground font-medium w-32">Timestamp</th>
-              <th className="px-3 py-2 text-left text-muted-foreground font-medium w-24">Sentiment</th>
-              <th className="px-3 py-2 text-left text-muted-foreground font-medium w-28">Status</th>
-              <th className="px-3 py-2 text-left text-muted-foreground font-medium w-20">Cluster</th>
+              {([
+                ['feedback_id', 'ID', 'w-20'],
+                ['source', 'Source', 'w-24'],
+                ['text', 'Feedback', ''],
+                ['customer_name', 'Customer', 'w-32'],
+                ['timestamp', 'Timestamp', 'w-32'],
+                ['sentiment', 'Sentiment', 'w-24'],
+                ['status', 'Status', 'w-28'],
+                ['cluster_id', 'Cluster', 'w-20'],
+              ] as [SortField, string, string][]).map(([field, label, width]) => (
+                <th
+                  key={field}
+                  onClick={() => toggleSort(field)}
+                  className={cn(
+                    'px-3 py-2 text-left text-muted-foreground font-medium cursor-pointer select-none hover:text-foreground transition-colors',
+                    width
+                  )}
+                >
+                  <span className="flex items-center gap-1">
+                    {label}
+                    <SortIcon field={field} />
+                  </span>
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>

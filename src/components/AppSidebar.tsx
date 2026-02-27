@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Inbox, GitBranch, Zap, Map, Users, ChevronLeft, ChevronRight, LayoutDashboard, Settings, ChevronsUpDown, Plus } from 'lucide-react';
+import { MessageSquare, GitBranch, Zap, Map, Users, ChevronLeft, ChevronRight, LayoutDashboard, Settings, ChevronsUpDown, Plus } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCompany } from '@/contexts/CompanyContext';
 import { cn } from '@/lib/utils';
@@ -13,7 +13,7 @@ import {
 
 const NAV_ITEMS = [
   { title: 'Dashboard', icon: LayoutDashboard, url: '/dashboard' },
-  { title: 'Inbox', icon: Inbox, url: '/inbox' },
+  { title: 'Feedback', icon: MessageSquare, url: '/inbox' },
   { title: 'Clusters', icon: GitBranch, url: '/clusters' },
   { title: 'Actions', icon: Zap, url: '/actions' },
   { title: 'Roadmap', icon: Map, url: '/roadmap' },
