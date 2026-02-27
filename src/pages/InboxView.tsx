@@ -186,6 +186,12 @@ export default function InboxView() {
   const bulkDelete = async () => {
     setBulkUpdating(true);
     const ids = [...selectedIds];
+
+    // Collect affected cluster_ids before deleting
+    const affectedClusterIds = feedback
+      .filter(f => ids.includes(f.id) && f.cluster_id)
+      .map(f => f.cluster_id!);
+
     const { error } = await supabase
       .from('feedback')
       .delete()
@@ -196,6 +202,25 @@ export default function InboxView() {
     } else {
       toast({ title: `Deleted ${ids.length} items` });
       setSelectedIds(new Set());
+
+      // Clean up orphaned clusters
+      if (affectedClusterIds.length > 0 && activeCompany) {
+        const uniqueClusterIds = [...new Set(affectedClusterIds)];
+        for (const clusterId of uniqueClusterIds) {
+          const { count } = await supabase
+            .from('feedback')
+            .select('*', { count: 'exact', head: true })
+            .eq('company_id', activeCompany.id)
+            .eq('cluster_id', clusterId);
+
+          if (count === 0) {
+            await supabase.from('clusters').delete().eq('cluster_id', clusterId).eq('company_id', activeCompany.id);
+          } else {
+            await supabase.from('clusters').update({ feedback_count: count }).eq('cluster_id', clusterId).eq('company_id', activeCompany.id);
+          }
+        }
+      }
+
       await fetchFeedback();
     }
     setBulkUpdating(false);
