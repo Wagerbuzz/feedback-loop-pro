@@ -8,7 +8,8 @@ import { Input } from '@/components/ui/input';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { MessageSquare, Mail, Slack, Headphones, Smartphone, Globe, Plus, Search, X, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react';
+import { MessageSquare, Mail, Slack, Headphones, Smartphone, Globe, Plus, Search, X, ArrowUp, ArrowDown, ArrowUpDown, Trash2 } from 'lucide-react';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { cn } from '@/lib/utils';
 import AddFeedbackDialog from '@/components/AddFeedbackDialog';
 
@@ -176,6 +177,24 @@ export default function InboxView() {
       toast({ title: 'Bulk update failed', description: error.message, variant: 'destructive' });
     } else {
       toast({ title: `Updated ${ids.length} items`, description: `${field} → ${value}` });
+      setSelectedIds(new Set());
+      await fetchFeedback();
+    }
+    setBulkUpdating(false);
+  };
+
+  const bulkDelete = async () => {
+    setBulkUpdating(true);
+    const ids = [...selectedIds];
+    const { error } = await supabase
+      .from('feedback')
+      .delete()
+      .in('id', ids);
+
+    if (error) {
+      toast({ title: 'Bulk delete failed', description: error.message, variant: 'destructive' });
+    } else {
+      toast({ title: `Deleted ${ids.length} items` });
       setSelectedIds(new Set());
       await fetchFeedback();
     }
@@ -385,6 +404,28 @@ export default function InboxView() {
               ))}
             </SelectContent>
           </Select>
+          <div className="w-px h-5 bg-border" />
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button size="sm" variant="destructive" className="h-7 text-xs gap-1" disabled={bulkUpdating}>
+                <Trash2 className="w-3 h-3" /> Delete
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete {selectedIds.size} feedback items?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This action cannot be undone. The selected feedback items will be permanently removed.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={bulkDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
           <div className="w-px h-5 bg-border" />
           <button
             onClick={() => setSelectedIds(new Set())}
