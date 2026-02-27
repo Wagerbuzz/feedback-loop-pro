@@ -6,8 +6,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
+import { Switch } from '@/components/ui/switch';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
-import { Building2, Globe, Plus, Loader2, Play, Clock, CheckCircle2, XCircle } from 'lucide-react';
+import { Building2, Globe, Plus, Loader2, Play, Clock, CheckCircle2, XCircle, CalendarClock } from 'lucide-react';
 
 interface Company {
   id: string;
@@ -17,6 +19,8 @@ interface Company {
   brand_terms: any;
   product_terms: any;
   created_at: string;
+  auto_collect_enabled: boolean;
+  collection_frequency: string;
 }
 
 interface CollectionRun {
@@ -288,6 +292,41 @@ export default function CompanySetup() {
                   )}
                   {(company.product_terms as any[])?.length > 0 && (
                     <div>{(company.product_terms as any[]).length} products</div>
+                  )}
+                </div>
+
+                {/* Auto-collection settings */}
+                <div className="mt-3 border-t border-border pt-3 flex items-center gap-4">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      checked={company.auto_collect_enabled}
+                      onCheckedChange={async (checked) => {
+                        await supabase.from('companies').update({ auto_collect_enabled: checked }).eq('id', company.id);
+                        setCompanies(cs => cs.map(c => c.id === company.id ? { ...c, auto_collect_enabled: checked } : c));
+                        toast.success(checked ? 'Auto-collection enabled' : 'Auto-collection disabled');
+                      }}
+                    />
+                    <label className="text-xs text-muted-foreground flex items-center gap-1">
+                      <CalendarClock className="w-3 h-3" /> Auto-collect
+                    </label>
+                  </div>
+                  {company.auto_collect_enabled && (
+                    <Select
+                      value={company.collection_frequency}
+                      onValueChange={async (value) => {
+                        await supabase.from('companies').update({ collection_frequency: value }).eq('id', company.id);
+                        setCompanies(cs => cs.map(c => c.id === company.id ? { ...c, collection_frequency: value } : c));
+                        toast.success(`Frequency set to ${value}`);
+                      }}
+                    >
+                      <SelectTrigger className="h-7 w-24 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="daily">Daily</SelectItem>
+                        <SelectItem value="weekly">Weekly</SelectItem>
+                      </SelectContent>
+                    </Select>
                   )}
                 </div>
 
