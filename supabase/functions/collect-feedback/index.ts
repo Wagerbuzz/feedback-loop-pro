@@ -241,12 +241,37 @@ async function collectTwitterFeedback(
     return { newCount, dupeCount, texts };
   }
 
+  const BEARER_TOKEN = Deno.env.get("TWITTER_BEARER_TOKEN");
   const CONSUMER_KEY = Deno.env.get("TWITTER_CONSUMER_KEY");
   const CONSUMER_SECRET = Deno.env.get("TWITTER_CONSUMER_SECRET");
-  const ACCESS_TOKEN = Deno.env.get("TWITTER_ACCESS_TOKEN");
-  const ACCESS_TOKEN_SECRET = Deno.env.get("TWITTER_ACCESS_TOKEN_SECRET");
 
-  if (!CONSUMER_KEY || !CONSUMER_SECRET || !ACCESS_TOKEN || !ACCESS_TOKEN_SECRET) {
+  let bearerToken = BEARER_TOKEN;
+
+  if (!bearerToken && CONSUMER_KEY && CONSUMER_SECRET) {
+    // Fall back to OAuth 2.0 client credentials flow
+    try {
+      const credentials = btoa(`${CONSUMER_KEY}:${CONSUMER_SECRET}`);
+      const tokenRes = await fetch("https://api.x.com/oauth2/token", {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${credentials}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: "grant_type=client_credentials",
+      });
+
+      if (!tokenRes.ok) {
+        console.warn("Twitter OAuth token exchange failed:", tokenRes.status);
+        return { newCount, dupeCount, texts };
+      }
+
+      const tokenData = await tokenRes.json();
+      bearerToken = tokenData.access_token;
+    } catch (authErr) {
+      console.warn("Twitter auth error:", authErr);
+      return { newCount, dupeCount, texts };
+    }
+  } else if (!bearerToken) {
     console.log("Twitter API keys not configured, skipping Twitter collection");
     return { newCount, dupeCount, texts };
   }
@@ -255,25 +280,6 @@ async function collectTwitterFeedback(
   const query = `"${brandName}" -is:retweet lang:en`;
 
   try {
-    // Get Bearer token via OAuth 2.0 client credentials
-    const credentials = btoa(`${CONSUMER_KEY}:${CONSUMER_SECRET}`);
-    const tokenRes = await fetch("https://api.x.com/oauth2/token", {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${credentials}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: "grant_type=client_credentials",
-    });
-
-    if (!tokenRes.ok) {
-      console.warn("Twitter auth failed:", tokenRes.status);
-      return { newCount, dupeCount, texts };
-    }
-
-    const tokenData = await tokenRes.json();
-    const bearerToken = tokenData.access_token;
-
     // Search recent tweets
     const searchUrl = `https://api.x.com/2/tweets/search/recent?query=${encodeURIComponent(query)}&max_results=100&tweet.fields=author_id,created_at,public_metrics,text`;
     const searchRes = await fetch(searchUrl, {
