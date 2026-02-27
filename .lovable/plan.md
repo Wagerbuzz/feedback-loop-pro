@@ -1,74 +1,85 @@
 
 
-# Fix Reddit and Twitter Collection
+# Fix Twitter Relevance Filtering for Ambiguous Brand Names
 
-## Problems Found
+## Problem
 
-1. **Edge function timeout**: The web collection phase (17 queries x 10 results) takes so long that the function times out (~60s limit) before Reddit and Twitter phases ever execute.
-
-2. **Empty subreddits**: All companies have `reddit_subreddits: []` because they were profiled before the subreddit discovery feature was added. This limits Reddit to only a generic global search.
-
-3. **Reddit blocking**: Reddit's public JSON API often rejects requests with generic User-Agent strings (403/429 errors), and the function has no logging for these failures that would surface clearly.
-
-4. **No timeout awareness**: The function doesn't track elapsed time, so it blindly runs all web queries even when there's no time left for Reddit/Twitter.
+The Twitter search query uses only the bare brand name (`"Conductor"`) which is highly ambiguous. The collected tweets are about `@conductor_build` (an AI coding tool), not your Conductor (the SEO platform at conductor.com). Out of the 7 tweets collected, none appear related to your product.
 
 ## Solution
 
-### 1. Add time-budget management
-Track elapsed time in the main handler. Allocate roughly 30s to web, 15s to Reddit, 15s to Twitter. When the web phase exceeds its budget, stop early and move on to Reddit/Twitter.
+### 1. Build a smarter Twitter search query
 
-### 2. Reduce web query count for multi-source runs
-When Reddit and Twitter are also enabled, limit web queries to 15 (instead of 25) to leave time for the other sources.
+Instead of just `"Conductor"`, construct a query that adds context using product terms, domain, or industry keywords to disambiguate. For example:
 
-### 3. Fix Reddit User-Agent
-Change the User-Agent to a more realistic browser-like string to avoid Reddit's automated request blocking. Also add better error logging.
+```
+("Conductor" SEO) OR ("Conductor" content) OR (conductor.com) -is:retweet lang:en
+```
 
-### 4. Backfill subreddits for existing companies
-Add a step that auto-generates subreddit suggestions based on the company's industry_type if `reddit_subreddits` is empty, so existing companies benefit from targeted subreddit searches.
+This uses the company's `product_terms` and `industry_type` to narrow results.
 
-### 5. Add diagnostic logging
-Add clear log lines at the start of each phase ("Starting Reddit phase...", "Starting Twitter phase...") and log any HTTP errors with status codes so failures are visible in logs.
+### 2. Add post-search brand validation
+
+After AI extraction, add a second check: verify the extracted feedback text mentions brand-relevant terms (SEO, content, search optimization, conductor.com, etc.) before inserting. This mirrors the existing web/Reddit filtering logic that already validates brand mentions.
+
+### 3. Raise the confidence threshold for ambiguous brands
+
+For Twitter specifically, bump the minimum confidence from 0.7 to 0.8 since tweets are short and more prone to false positives.
 
 ## Technical Details
 
 ### File: `supabase/functions/collect-feedback/index.ts`
 
-**Time budget logic** (add to main handler before Phase 1):
+**Query construction** (replace the simple `"${brandName}" -is:retweet lang:en` on ~line 305):
+
+Build an OR query combining the brand name with product terms or industry keywords:
 ```typescript
-const startTime = Date.now();
-const TIME_BUDGET_MS = 55000; // 55s total (leave 5s margin)
-const hasMultipleSources = collectionSources.length > 1;
-const webQueryLimit = hasMultipleSources ? 15 : 25;
-const webBudgetMs = hasMultipleSources ? 30000 : 45000;
+const productTerms = (company.product_terms || []).slice(0, 3);
+const industryType = company.industry_type || "";
+
+// Build disambiguation terms from product_terms and industry
+const contextTerms = [...productTerms.map(t => t.split(" ").pop()), industryType]
+  .filter(Boolean)
+  .slice(0, 3);
+
+let query: string;
+if (contextTerms.length > 0) {
+  // Create OR clauses: ("Brand" term1) OR ("Brand" term2) OR (domain)
+  const orClauses = contextTerms.map(t => `("${brandName}" ${t})`);
+  orClauses.push(`(${company.domain})`);
+  query = `(${orClauses.join(" OR ")}) -is:retweet lang:en`;
+} else {
+  query = `"${brandName}" -is:retweet lang:en`;
+}
 ```
 
-**Web phase**: Check elapsed time each iteration, break early if over budget. Use `webQueryLimit` instead of hardcoded 25.
+For Conductor, this produces: `("Conductor" SEO) OR ("Conductor" Intelligence) OR ("Conductor" Monitoring) OR (conductor.com) -is:retweet lang:en`
 
-**Reddit phase**: 
-- Change User-Agent to `Mozilla/5.0 (compatible; FeedbackBot/1.0)`
-- Add fallback subreddits based on industry_type when `reddit_subreddits` is empty (e.g., for SEO tools: `["SEO", "bigseo", "digital_marketing"]`)
-- Add `console.log("Starting Reddit collection phase...")` before the call
-
-**Twitter phase**:
-- Add `console.log("Starting Twitter collection phase...")` before the call
-- Log bearer token availability check result
-
-**Subreddit fallback map** (inside `collectRedditFeedback`):
-```typescript
-const INDUSTRY_SUBREDDITS: Record<string, string[]> = {
-  "SEO": ["SEO", "bigseo", "digital_marketing"],
-  "SaaS": ["SaaS", "startups", "software"],
-  "Database": ["databases", "dataengineering", "devops"],
-  "Analytics": ["analytics", "datascience", "BusinessIntelligence"],
-  // ... more mappings
-};
+**AI prompt improvement** (~line 338): Add product context to help the AI distinguish:
+```
+Extract customer feedback from tweets about ${company.name} (${company.domain}), 
+a ${company.industry_type || "software"} product. 
+Only extract tweets about THIS specific product, not other products 
+that share the same name. Skip tweets about unrelated products, 
+promotional tweets, ads, and bot content.
 ```
 
-If `subreddits` is empty and company has an `industry_type`, use the fallback map.
+**Post-extraction brand validation** (~line 397): Add the same brand-mention check used in Reddit:
+```typescript
+const feedbackLower = item.text.toLowerCase();
+const allTerms = [...brandTerms, ...(company.product_terms || []), company.domain];
+const mentionsBrand = allTerms.some(t => feedbackLower.includes(t.toLowerCase()));
+if (!mentionsBrand && (item.confidence || 0) < 0.85) continue;
+```
+
+## Files Changed
+
+| File | Change |
+|---|---|
+| `supabase/functions/collect-feedback/index.ts` | Smarter Twitter query with disambiguation, improved AI prompt, post-extraction brand validation |
 
 ## Expected Outcome
 
-- Reddit and Twitter phases will actually execute (not get starved by web phase timeout)
-- Reddit requests will succeed more reliably with a proper User-Agent
-- Existing companies will get subreddit coverage via industry-based fallbacks
-- Clear logging will make it easy to diagnose any remaining issues
+- Twitter search will target SEO/content-related Conductor tweets, not the AI coding tool
+- AI extraction prompt will have enough context to distinguish between products sharing the name
+- Post-extraction validation will catch any remaining false positives
