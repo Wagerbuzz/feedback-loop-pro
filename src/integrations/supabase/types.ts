@@ -190,6 +190,7 @@ export type Database = {
           auto_collect_enabled: boolean
           brand_terms: Json | null
           collection_frequency: string
+          collection_sources: Json | null
           created_at: string
           domain: string
           feature_terms: Json | null
@@ -199,6 +200,7 @@ export type Database = {
           name: string
           persona_type: string | null
           product_terms: Json | null
+          reddit_subreddits: Json | null
           search_queries: Json | null
           user_id: string
         }
@@ -206,6 +208,7 @@ export type Database = {
           auto_collect_enabled?: boolean
           brand_terms?: Json | null
           collection_frequency?: string
+          collection_sources?: Json | null
           created_at?: string
           domain: string
           feature_terms?: Json | null
@@ -215,6 +218,7 @@ export type Database = {
           name: string
           persona_type?: string | null
           product_terms?: Json | null
+          reddit_subreddits?: Json | null
           search_queries?: Json | null
           user_id: string
         }
@@ -222,6 +226,7 @@ export type Database = {
           auto_collect_enabled?: boolean
           brand_terms?: Json | null
           collection_frequency?: string
+          collection_sources?: Json | null
           created_at?: string
           domain?: string
           feature_terms?: Json | null
@@ -231,6 +236,7 @@ export type Database = {
           name?: string
           persona_type?: string | null
           product_terms?: Json | null
+          reddit_subreddits?: Json | null
           search_queries?: Json | null
           user_id?: string
         }
