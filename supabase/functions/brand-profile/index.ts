@@ -85,8 +85,13 @@ serve(async (req) => {
                     type: "string",
                     description: "Primary user persona (e.g. 'developer', 'data engineer', 'enterprise admin')",
                   },
+                  reddit_subreddits: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Relevant subreddit names (without r/) where users discuss this product (e.g. 'mongodb', 'database', 'devops')",
+                  },
                 },
-                required: ["brand_terms", "product_terms", "feature_terms", "industry_type", "persona_type"],
+                required: ["brand_terms", "product_terms", "feature_terms", "industry_type", "persona_type", "reddit_subreddits"],
                 additionalProperties: false,
               },
             },
@@ -145,6 +150,7 @@ serve(async (req) => {
       feature_terms: profile.feature_terms,
       industry_type: profile.industry_type,
       persona_type: profile.persona_type,
+      reddit_subreddits: profile.reddit_subreddits || [],
       search_queries: queries,
     };
 

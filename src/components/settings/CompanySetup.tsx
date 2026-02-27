@@ -7,9 +7,10 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Switch } from '@/components/ui/switch';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
-import { Building2, Globe, Plus, Loader2, Play, Clock, CheckCircle2, XCircle, CalendarClock } from 'lucide-react';
+import { Building2, Globe, Plus, Loader2, Play, Clock, CheckCircle2, XCircle, CalendarClock, AlertCircle } from 'lucide-react';
 
 interface Company {
   id: string;
@@ -21,6 +22,8 @@ interface Company {
   created_at: string;
   auto_collect_enabled: boolean;
   collection_frequency: string;
+  collection_sources: string[] | null;
+  reddit_subreddits: string[] | null;
 }
 
 interface CollectionRun {
@@ -34,6 +37,12 @@ interface CollectionRun {
   error_message: string | null;
 }
 
+const SOURCE_OPTIONS = [
+  { id: 'web', label: 'Web (G2, TrustRadius, blogs)', alwaysAvailable: true },
+  { id: 'reddit', label: 'Reddit', alwaysAvailable: true },
+  { id: 'twitter', label: 'Twitter / X', alwaysAvailable: false },
+];
+
 export default function CompanySetup() {
   const { user } = useAuth();
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -46,6 +55,7 @@ export default function CompanySetup() {
   const [newDomain, setNewDomain] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [twitterConfigured, setTwitterConfigured] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -86,7 +96,6 @@ export default function CompanySetup() {
     setProgress(10);
 
     try {
-      // Step 1: Profile the brand
       toast.info(`Analyzing ${newName}...`);
       setProgress(20);
       const profileResult = await profileBrand(newName.trim(), newDomain.trim());
@@ -98,7 +107,6 @@ export default function CompanySetup() {
 
       const profile = profileResult.data;
 
-      // Step 2: Save company with profile
       const { data: inserted, error } = await supabase
         .from('companies')
         .insert({
@@ -111,6 +119,8 @@ export default function CompanySetup() {
           industry_type: profile.industry_type,
           persona_type: profile.persona_type,
           search_queries: profile.search_queries,
+          reddit_subreddits: profile.reddit_subreddits || [],
+          collection_sources: ['web', 'reddit'],
         })
         .select()
         .single();
@@ -119,7 +129,7 @@ export default function CompanySetup() {
 
       if (error) throw new Error(error.message);
 
-      toast.success(`${newName} added with ${profile.search_queries?.length || 0} search queries`);
+      toast.success(`${newName} added with ${profile.search_queries?.length || 0} search queries and ${profile.reddit_subreddits?.length || 0} subreddits`);
       setNewName('');
       setNewDomain('');
       setShowForm(false);
@@ -139,7 +149,6 @@ export default function CompanySetup() {
     toast.info(`Collecting feedback for ${company.name}... This may take a few minutes.`);
 
     try {
-      // Simulate progress
       const progressInterval = setInterval(() => {
         setProgress((p) => Math.min(p + 5, 90));
       }, 3000);
@@ -164,6 +173,16 @@ export default function CompanySetup() {
       setCollecting(null);
       setProgress(0);
     }
+  };
+
+  const toggleSource = async (company: Company, sourceId: string, enabled: boolean) => {
+    const current = (company.collection_sources as string[]) || ['web', 'reddit'];
+    const updated = enabled
+      ? [...current, sourceId]
+      : current.filter(s => s !== sourceId);
+    
+    await supabase.from('companies').update({ collection_sources: updated } as any).eq('id', company.id);
+    setCompanies(cs => cs.map(c => c.id === company.id ? { ...c, collection_sources: updated } : c));
   };
 
   return (
@@ -238,6 +257,7 @@ export default function CompanySetup() {
           {companies.map((company) => {
             const isCollecting = collecting === company.id;
             const companyRuns = runs[company.id] || [];
+            const sources = (company.collection_sources as string[]) || ['web', 'reddit'];
 
             return (
               <div key={company.id} className="bg-card border border-border rounded-lg p-4">
@@ -275,7 +295,7 @@ export default function CompanySetup() {
                 {isCollecting && (
                   <div className="mt-3">
                     <Progress value={progress} className="h-1.5" />
-                    <div className="text-xs text-muted-foreground mt-1">Searching the web for feedback...</div>
+                    <div className="text-xs text-muted-foreground mt-1">Searching web, Reddit, and more for feedback...</div>
                   </div>
                 )}
 
@@ -290,9 +310,36 @@ export default function CompanySetup() {
                   {(company.brand_terms as any[])?.length > 0 && (
                     <div>{(company.brand_terms as any[]).length} brand terms</div>
                   )}
-                  {(company.product_terms as any[])?.length > 0 && (
-                    <div>{(company.product_terms as any[]).length} products</div>
+                  {(company.reddit_subreddits as any[])?.length > 0 && (
+                    <div>{(company.reddit_subreddits as any[]).length} subreddits</div>
                   )}
+                </div>
+
+                {/* Collection sources */}
+                <div className="mt-3 border-t border-border pt-3">
+                  <div className="text-xs text-muted-foreground mb-2">Collection Sources</div>
+                  <div className="flex flex-wrap gap-3">
+                    {SOURCE_OPTIONS.map((src) => {
+                      const isEnabled = sources.includes(src.id);
+                      const isTwitter = src.id === 'twitter';
+
+                      return (
+                        <label key={src.id} className="flex items-center gap-1.5 text-xs cursor-pointer">
+                          <Checkbox
+                            checked={isEnabled}
+                            onCheckedChange={(checked) => toggleSource(company, src.id, !!checked)}
+                          />
+                          <span>{src.label}</span>
+                          {isTwitter && !src.alwaysAvailable && (
+                            <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground">
+                              <AlertCircle className="w-3 h-3" />
+                              requires API keys
+                            </span>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 {/* Auto-collection settings */}
