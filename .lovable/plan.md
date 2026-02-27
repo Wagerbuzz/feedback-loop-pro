@@ -1,142 +1,104 @@
 
 
-# Fix Feedback Relevance and Add Continuous Collection
+# Comprehensive Feedback Collection Expansion
 
-## Problems Identified
+## Current Limitations
 
-### 1. Irrelevant Feedback Leaking In
-The "Conductor" reviews (e.g., "Maximizing SEO Success with Conductor") come from TrustRadius pages that mention AirOps tangentially or are returned by Firecrawl search but are actually reviews for a different product (Conductor). All 5 TrustRadius results for AirOps are actually Conductor reviews.
+The collection pipeline currently relies solely on Firecrawl web search, which is a general-purpose scraper. This creates several gaps:
 
-**Root cause**: The brand mention check on line 87-88 of `collect-feedback` only checks if ANY brand term appears in the page content. When Firecrawl returns a TrustRadius comparison or category page, the page may mention "AirOps" once in a sidebar while the actual reviews are about Conductor.
-
-**Also**: Some G2 results come from category pages (e.g., `/categories/answer-engine-optimization-aeo/`) rather than actual AirOps product review pages, pulling in generic SEO tool feedback.
-
-### 2. No Continuous/Scheduled Collection
-Currently, collection only runs when a user manually clicks "Collect Now." There's no automated scheduling, so the system is not acting as a continuous agent.
-
----
+- **Shallow search depth**: Only 5 results per query, 15 queries max = 75 pages ceiling
+- **Reddit**: `site:reddit.com` queries exist but Firecrawl often gets blocked or returns few results from Reddit
+- **Twitter/X**: Zero coverage -- no integration exists
+- **Review sites**: Only scrapes the first page of results; G2 and TrustRadius have paginated reviews that are missed
 
 ## Plan
 
-### Fix 1: Stricter Relevance Filtering in `collect-feedback`
+### 1. Increase Firecrawl Search Depth
 
-Improve the AI extraction prompt and add post-extraction validation:
+Simple but effective -- increase `limit` from 5 to 10 per query and raise the query cap from 15 to 25. This alone could roughly double the feedback collected from web sources.
 
-- **Require the feedback text itself to mention the brand** -- not just the page. After AI extracts each feedback item, validate that `item.text` contains at least one brand term. If not, skip it.
-- **Add URL-level filtering**: Skip TrustRadius/G2 pages that are clearly for a different product (e.g., URL contains `/products/conductor/` but the brand is "AirOps").
-- **Strengthen the AI system prompt**: Explicitly instruct the LLM to only extract feedback that is **directly about** the target company, and to ignore reviews of competing or unrelated products on the same page.
-- **Add a minimum confidence threshold**: Skip items where `confidence < 0.7`.
+**File**: `supabase/functions/collect-feedback/index.ts`
+- Change `limit: 5` to `limit: 10`
+- Change `queries.slice(0, 15)` to `queries.slice(0, 25)`
 
-### Fix 2: Better Source URL Validation
+### 2. Add Dedicated Reddit Collection
 
-Add a function that checks whether the source URL is likely relevant:
-- If URL contains `/products/{other_product}/`, skip unless `other_product` matches a brand term
-- If URL is a category/listing page (contains `/categories/`), skip entirely
-- If URL is a competitor comparison page, keep only feedback items that explicitly name the target brand in the text
+Use Reddit's public JSON API (no API key required) to search subreddits for brand mentions and extract comments. This is far more reliable than scraping Reddit through Firecrawl.
 
-### Fix 3: Scheduled Automatic Collection via pg_cron
+**Approach**:
+- For each brand, search Reddit via `https://www.reddit.com/search.json?q={brand}&sort=relevance&limit=25`
+- Also target specific subreddits (e.g., `/r/mongodb/search.json`, `/r/database/search.json`)
+- For each relevant post, fetch comments via `https://www.reddit.com/comments/{post_id}.json`
+- Extract individual comments as feedback items using the same AI extraction pipeline
+- Reddit's JSON API is public and rate-limited to ~60 requests/minute (no key needed)
 
-Set up a database cron job that triggers the `collect-feedback` edge function automatically:
+**File**: `supabase/functions/collect-feedback/index.ts`
+- Add a new `collectRedditFeedback()` function that runs after the Firecrawl phase
+- Generates subreddit targets from the company's industry type
+- Source labeled as "Reddit" with direct permalink URLs
 
-- Enable `pg_cron` and `pg_net` extensions
-- Create a cron job that runs daily, querying the `companies` table for companies where `auto_collect_enabled = true`
-- For each eligible company (based on `collection_frequency` -- daily or weekly), call the `collect-feedback` edge function
-- Add a "Schedule" toggle in the CompanySetup UI so users can enable/disable auto-collection per brand
+### 3. Add Twitter/X Collection
 
-### Fix 4: Clean Up Existing Bad Data
+Twitter requires API credentials but provides access to real-time customer sentiment. The X API v2 search endpoint can find recent tweets mentioning the brand.
 
-Delete the 5 Conductor reviews and any other irrelevant feedback from the AirOps company:
-- Remove feedback where `source_url` contains `/products/conductor/`
-- Remove feedback from category listing pages
+**Approach**:
+- Use the X API v2 Recent Search endpoint: `GET https://api.x.com/2/tweets/search/recent`
+- Search for brand mentions (e.g., `"MongoDB" -is:retweet lang:en`)
+- Extract tweet text, author, and engagement metrics
+- Requires 4 secrets: `TWITTER_CONSUMER_KEY`, `TWITTER_CONSUMER_SECRET`, `TWITTER_ACCESS_TOKEN`, `TWITTER_ACCESS_TOKEN_SECRET`
 
----
+**File**: `supabase/functions/collect-feedback/index.ts`
+- Add a `collectTwitterFeedback()` function
+- Source labeled as "Twitter" with tweet permalink URLs
+- Only runs if Twitter secrets are configured (gracefully skipped otherwise)
 
-## Technical Details
+### 4. Add Source-Specific Search Queries During Brand Profiling
 
-### Modified: `supabase/functions/collect-feedback/index.ts`
+Update the brand-profile function to generate Reddit and Twitter-specific search queries alongside the existing web queries.
 
-**AI prompt update** (line 104):
-```
-Extract ONLY genuine user opinions about ${company.name} specifically.
-Do NOT extract reviews about other products even if they appear on the same page.
-Every extracted item MUST be directly about ${company.name} or its products.
-```
+**File**: `supabase/functions/brand-profile/index.ts`
+- Add `reddit_subreddits` field to the AI extraction (e.g., ["mongodb", "database", "devops"])
+- Store these on the company record for targeted Reddit collection
 
-**Post-extraction brand validation** (after line 178):
-```typescript
-// Verify feedback text mentions the brand
-const feedbackLower = item.text.toLowerCase();
-const mentionsBrand = brandTerms.some(t => feedbackLower.includes(t.toLowerCase()));
-if (!mentionsBrand && item.confidence < 0.9) continue;
-```
+### 5. UI: Show Collection Sources and Enable/Disable Per Source
 
-**URL relevance check** (after line 87):
-```typescript
-// Skip URLs clearly about other products
-const urlLower = url.toLowerCase();
-const isOtherProductPage = urlLower.includes('/products/') &&
-  !brandTerms.some(t => urlLower.includes(t.toLowerCase()));
-const isCategoryPage = urlLower.includes('/categories/');
-if (isOtherProductPage || isCategoryPage) continue;
-```
+Update CompanySetup to show which sources are active and let users toggle them.
 
-**Confidence threshold** (line 178 area):
-```typescript
-if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.7) continue;
-```
+**File**: `src/components/settings/CompanySetup.tsx`
+- Add checkboxes for collection sources: Web, Reddit, Twitter
+- Show Twitter as "requires API keys" with a setup link if secrets aren't configured
+- Display source breakdown in collection run results
 
-### New: Scheduled Collection (pg_cron)
+### 6. Database Changes
 
-Create a cron job that runs every 6 hours checking for companies that need collection:
+Add columns to track source-specific configuration:
+
 ```sql
--- Enable extensions
-CREATE EXTENSION IF NOT EXISTS pg_cron;
-CREATE EXTENSION IF NOT EXISTS pg_net;
-
--- Daily check: call collect-feedback for eligible companies
-SELECT cron.schedule(
-  'auto-collect-feedback',
-  '0 6 * * *',  -- daily at 6 AM UTC
-  $$
-  SELECT net.http_post(
-    url := 'https://tmeloxtelmoguhgksjuy.supabase.co/functions/v1/collect-feedback',
-    headers := '{"Content-Type": "application/json", "Authorization": "Bearer <anon_key>"}'::jsonb,
-    body := concat('{"company_id": "', id, '"}')::jsonb
-  )
-  FROM public.companies
-  WHERE auto_collect_enabled = true
-    AND (last_collected_at IS NULL
-         OR (collection_frequency = 'daily' AND last_collected_at < now() - interval '23 hours')
-         OR (collection_frequency = 'weekly' AND last_collected_at < now() - interval '6 days'))
-  $$
-);
+ALTER TABLE public.companies
+  ADD COLUMN reddit_subreddits jsonb DEFAULT '[]'::jsonb,
+  ADD COLUMN collection_sources jsonb DEFAULT '["web", "reddit"]'::jsonb;
 ```
 
-### Modified: `src/components/settings/CompanySetup.tsx`
+## Impact Estimate
 
-Add a toggle for auto-collection per company:
-- Switch component for `auto_collect_enabled`
-- Dropdown for `collection_frequency` (daily/weekly)
-- Show next scheduled collection time
-
-### Data Cleanup
-
-Delete irrelevant feedback already collected:
-```sql
-DELETE FROM feedback
-WHERE company_id = '6e764418-ec2a-4c6f-ba3e-0c341b6c4d34'
-  AND (source_url LIKE '%/products/conductor%'
-       OR source_url LIKE '%/categories/%');
-```
-
----
+| Source | Current | After Changes |
+|--------|---------|---------------|
+| Web (Firecrawl) | ~75 pages/run | ~250 pages/run |
+| Reddit | ~0 (unreliable via Firecrawl) | ~50-100 posts + comments/run |
+| Twitter/X | 0 | ~100 tweets/run (if configured) |
+| Review sites | First page only | Same (future: pagination) |
 
 ## Files Changed
 
 | File | Change |
 |---|---|
-| `supabase/functions/collect-feedback/index.ts` | Stricter relevance filtering, URL validation, confidence threshold, improved AI prompt |
-| `src/components/settings/CompanySetup.tsx` | Add auto-collect toggle and frequency selector per company |
-| Database (cron) | Schedule daily collection job via pg_cron + pg_net |
-| Database (cleanup) | Delete existing irrelevant feedback |
+| `supabase/functions/collect-feedback/index.ts` | Increase limits, add Reddit JSON API collection, add Twitter API collection |
+| `supabase/functions/brand-profile/index.ts` | Generate reddit_subreddits during profiling |
+| `src/components/settings/CompanySetup.tsx` | Source toggles, Twitter setup prompt |
+| Database migration | Add `reddit_subreddits` and `collection_sources` columns to companies |
+
+## Secrets Required
+
+- **Reddit**: None (public JSON API)
+- **Twitter/X**: 4 secrets needed -- user will be prompted to provide them. Twitter collection is optional and gracefully skipped if not configured.
 
