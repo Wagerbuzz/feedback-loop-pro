@@ -33,7 +33,32 @@ async function collectRedditFeedback(
   }
 
   const brandName = brandTerms[0] || company.name;
-  const subreddits = (company.reddit_subreddits as string[]) || [];
+  let subreddits = (company.reddit_subreddits as string[]) || [];
+
+  // Fallback subreddits based on industry_type if none configured
+  if (subreddits.length === 0 && company.industry_type) {
+    const INDUSTRY_SUBREDDITS: Record<string, string[]> = {
+      "SEO": ["SEO", "bigseo", "digital_marketing"],
+      "SaaS": ["SaaS", "startups", "software"],
+      "Database": ["databases", "dataengineering", "devops"],
+      "Analytics": ["analytics", "datascience", "BusinessIntelligence"],
+      "Marketing": ["marketing", "digital_marketing", "content_marketing"],
+      "E-commerce": ["ecommerce", "shopify", "smallbusiness"],
+      "Security": ["netsec", "cybersecurity", "infosec"],
+      "DevOps": ["devops", "sysadmin", "kubernetes"],
+      "AI": ["artificial", "MachineLearning", "ChatGPT"],
+      "CRM": ["sales", "CRM", "smallbusiness"],
+      "Project Management": ["projectmanagement", "agile", "scrum"],
+      "HR": ["humanresources", "recruiting", "jobs"],
+    };
+    const industryKey = Object.keys(INDUSTRY_SUBREDDITS).find(
+      (k) => company.industry_type.toLowerCase().includes(k.toLowerCase())
+    );
+    if (industryKey) {
+      subreddits = INDUSTRY_SUBREDDITS[industryKey];
+      console.log(`Using fallback subreddits for ${company.industry_type}: ${subreddits.join(", ")}`);
+    }
+  }
 
   // Build search URLs: general search + specific subreddits
   const searchUrls: string[] = [
@@ -51,11 +76,11 @@ async function collectRedditFeedback(
     try {
       console.log(`Reddit search: ${searchUrl}`);
       const res = await fetch(searchUrl, {
-        headers: { "User-Agent": "FeedbackCollector/1.0" },
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; FeedbackBot/1.0)" },
       });
 
       if (!res.ok) {
-        console.warn(`Reddit search failed: ${res.status}`);
+        console.warn(`Reddit search failed: ${res.status} ${res.statusText} for ${searchUrl}`);
         continue;
       }
 
@@ -72,7 +97,7 @@ async function collectRedditFeedback(
           await new Promise((r) => setTimeout(r, 1200)); // Rate limit: ~60 req/min
           const commentsRes = await fetch(
             `https://www.reddit.com/comments/${postData.id}.json?limit=20&sort=top`,
-            { headers: { "User-Agent": "FeedbackCollector/1.0" } }
+            { headers: { "User-Agent": "Mozilla/5.0 (compatible; FeedbackBot/1.0)" } }
           );
 
           if (!commentsRes.ok) continue;
@@ -454,11 +479,25 @@ serve(async (req) => {
     const brandTerms = (company.brand_terms as string[]) || [company.name];
     const collectionSources = (company.collection_sources as string[]) || ["web", "reddit"];
 
-    console.log(`Starting collection for ${company.name} with ${queries.length} queries, sources: ${collectionSources.join(", ")}`);
+    // Time budget management
+    const startTime = Date.now();
+    const TIME_BUDGET_MS = 55000; // 55s total (leave 5s margin)
+    const hasMultipleSources = collectionSources.length > 1;
+    const webQueryLimit = hasMultipleSources ? 15 : 25;
+    const webBudgetMs = hasMultipleSources ? 30000 : 45000;
 
-    // ===== Phase 1: Firecrawl Web Search (increased limits) =====
+    console.log(`Starting collection for ${company.name} with ${queries.length} queries (limit: ${webQueryLimit}), sources: ${collectionSources.join(", ")}`);
+
+    // ===== Phase 1: Firecrawl Web Search =====
     if (collectionSources.includes("web")) {
-      for (const q of queries.slice(0, 25)) {
+      console.log("Starting web collection phase...");
+      for (const q of queries.slice(0, webQueryLimit)) {
+        // Check time budget
+        const elapsed = Date.now() - startTime;
+        if (elapsed > webBudgetMs) {
+          console.log(`Web phase time budget exceeded (${elapsed}ms / ${webBudgetMs}ms), moving to next phase`);
+          break;
+        }
         try {
           console.log(`Searching: ${q.query_text}`);
           const searchRes = await fetch("https://api.firecrawl.dev/v1/search", {
@@ -640,16 +679,29 @@ serve(async (req) => {
     }
 
     // ===== Phase 2: Reddit Collection =====
-    const redditResult = await collectRedditFeedback(company, brandTerms, supabase, company_id, LOVABLE_API_KEY);
-    totalNew += redditResult.newCount;
-    totalDuplicates += redditResult.dupeCount;
-    allFeedbackTexts.push(...redditResult.texts);
+    console.log(`Starting Reddit collection phase... (elapsed: ${Date.now() - startTime}ms)`);
+    if (Date.now() - startTime < TIME_BUDGET_MS) {
+      const redditResult = await collectRedditFeedback(company, brandTerms, supabase, company_id, LOVABLE_API_KEY);
+      totalNew += redditResult.newCount;
+      totalDuplicates += redditResult.dupeCount;
+      allFeedbackTexts.push(...redditResult.texts);
+    } else {
+      console.log("Skipping Reddit phase - time budget exhausted");
+    }
 
     // ===== Phase 3: Twitter/X Collection =====
-    const twitterResult = await collectTwitterFeedback(company, brandTerms, supabase, company_id, LOVABLE_API_KEY);
-    totalNew += twitterResult.newCount;
-    totalDuplicates += twitterResult.dupeCount;
-    allFeedbackTexts.push(...twitterResult.texts);
+    console.log(`Starting Twitter collection phase... (elapsed: ${Date.now() - startTime}ms)`);
+    const hasBearerToken = !!Deno.env.get("TWITTER_BEARER_TOKEN");
+    const hasConsumerKeys = !!Deno.env.get("TWITTER_CONSUMER_KEY") && !!Deno.env.get("TWITTER_CONSUMER_SECRET");
+    console.log(`Twitter auth: bearer=${hasBearerToken}, consumer_keys=${hasConsumerKeys}`);
+    if (Date.now() - startTime < TIME_BUDGET_MS) {
+      const twitterResult = await collectTwitterFeedback(company, brandTerms, supabase, company_id, LOVABLE_API_KEY);
+      totalNew += twitterResult.newCount;
+      totalDuplicates += twitterResult.dupeCount;
+      allFeedbackTexts.push(...twitterResult.texts);
+    } else {
+      console.log("Skipping Twitter phase - time budget exhausted");
+    }
 
     // ===== Clustering phase =====
     let clustersUpdated = 0;
