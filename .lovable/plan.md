@@ -1,85 +1,101 @@
 
 
-# Fix Twitter Relevance Filtering for Ambiguous Brand Names
+# Fix Feedback Deletion and Cluster Cleanup
 
-## Problem
+## Problems
 
-The Twitter search query uses only the bare brand name (`"Conductor"`) which is highly ambiguous. The collected tweets are about `@conductor_build` (an AI coding tool), not your Conductor (the SEO platform at conductor.com). Out of the 7 tweets collected, none appear related to your product.
+### 1. Orphaned Clusters After Feedback Deletion
+When feedback is deleted from the Inbox, the associated clusters in the Clusters view remain untouched. The `clusters` table has no relationship to `feedback` that would trigger cleanup. Clusters show stale `feedback_count` values and reference feedback that no longer exists.
+
+### 2. Re-collection Returns Fewer Items
+This is actually expected behavior, not a bug. Web search results are non-deterministic -- Google/Bing return different results each time. The deduplication (content_hash) correctly allows re-insertion of deleted items, but the search engine simply returns different pages on each run. However, we can improve the experience by clearly communicating this.
 
 ## Solution
 
-### 1. Build a smarter Twitter search query
+### 1. Auto-cleanup orphaned clusters when feedback is deleted
+Add logic to the bulk delete flow in `InboxView.tsx` that, after deleting feedback, checks if any clusters have zero remaining feedback items and removes them. Also recalculate `feedback_count` on remaining clusters.
 
-Instead of just `"Conductor"`, construct a query that adds context using product terms, domain, or industry keywords to disambiguate. For example:
-
-```
-("Conductor" SEO) OR ("Conductor" content) OR (conductor.com) -is:retweet lang:en
-```
-
-This uses the company's `product_terms` and `industry_type` to narrow results.
-
-### 2. Add post-search brand validation
-
-After AI extraction, add a second check: verify the extracted feedback text mentions brand-relevant terms (SEO, content, search optimization, conductor.com, etc.) before inserting. This mirrors the existing web/Reddit filtering logic that already validates brand mentions.
-
-### 3. Raise the confidence threshold for ambiguous brands
-
-For Twitter specifically, bump the minimum confidence from 0.7 to 0.8 since tweets are short and more prone to false positives.
+### 2. Add a "Clean up clusters" step after deletion
+After bulk-deleting feedback, query the clusters table and remove any cluster whose `cluster_id` no longer appears in any feedback row. Update `feedback_count` for remaining clusters.
 
 ## Technical Details
 
-### File: `supabase/functions/collect-feedback/index.ts`
+### File: `src/pages/InboxView.tsx`
 
-**Query construction** (replace the simple `"${brandName}" -is:retweet lang:en` on ~line 305):
+Update the `bulkDelete` function to also clean up orphaned clusters after deleting feedback:
 
-Build an OR query combining the brand name with product terms or industry keywords:
 ```typescript
-const productTerms = (company.product_terms || []).slice(0, 3);
-const industryType = company.industry_type || "";
+const bulkDelete = async () => {
+  setBulkUpdating(true);
+  const ids = [...selectedIds];
+  
+  // Get the cluster_ids of feedback being deleted (for cleanup)
+  const affectedClusterIds = feedback
+    .filter(f => ids.includes(f.id) && f.cluster_id)
+    .map(f => f.cluster_id!);
+  
+  // Delete the feedback
+  const { error } = await supabase
+    .from('feedback')
+    .delete()
+    .in('id', ids);
 
-// Build disambiguation terms from product_terms and industry
-const contextTerms = [...productTerms.map(t => t.split(" ").pop()), industryType]
-  .filter(Boolean)
-  .slice(0, 3);
-
-let query: string;
-if (contextTerms.length > 0) {
-  // Create OR clauses: ("Brand" term1) OR ("Brand" term2) OR (domain)
-  const orClauses = contextTerms.map(t => `("${brandName}" ${t})`);
-  orClauses.push(`(${company.domain})`);
-  query = `(${orClauses.join(" OR ")}) -is:retweet lang:en`;
-} else {
-  query = `"${brandName}" -is:retweet lang:en`;
-}
+  if (error) {
+    toast({ title: 'Bulk delete failed', description: error.message, variant: 'destructive' });
+  } else {
+    toast({ title: `Deleted ${ids.length} items` });
+    setSelectedIds(new Set());
+    
+    // Clean up orphaned clusters
+    if (affectedClusterIds.length > 0 && activeCompany) {
+      const uniqueClusterIds = [...new Set(affectedClusterIds)];
+      for (const clusterId of uniqueClusterIds) {
+        // Count remaining feedback with this cluster_id
+        const { count } = await supabase
+          .from('feedback')
+          .select('*', { count: 'exact', head: true })
+          .eq('company_id', activeCompany.id)
+          .eq('cluster_id', clusterId);
+        
+        if (count === 0) {
+          // No feedback left for this cluster - delete it
+          await supabase.from('clusters').delete().eq('cluster_id', clusterId);
+        } else {
+          // Update the feedback_count
+          await supabase.from('clusters')
+            .update({ feedback_count: count })
+            .eq('cluster_id', clusterId);
+        }
+      }
+    }
+    
+    await fetchFeedback();
+  }
+  setBulkUpdating(false);
+};
 ```
 
-For Conductor, this produces: `("Conductor" SEO) OR ("Conductor" Intelligence) OR ("Conductor" Monitoring) OR (conductor.com) -is:retweet lang:en`
+### Database: Add DELETE policy for clusters table
 
-**AI prompt improvement** (~line 338): Add product context to help the AI distinguish:
-```
-Extract customer feedback from tweets about ${company.name} (${company.domain}), 
-a ${company.industry_type || "software"} product. 
-Only extract tweets about THIS specific product, not other products 
-that share the same name. Skip tweets about unrelated products, 
-promotional tweets, ads, and bot content.
-```
+The `clusters` table currently has no DELETE RLS policy. We need to add one so the UI can remove orphaned clusters.
 
-**Post-extraction brand validation** (~line 397): Add the same brand-mention check used in Reddit:
-```typescript
-const feedbackLower = item.text.toLowerCase();
-const allTerms = [...brandTerms, ...(company.product_terms || []), company.domain];
-const mentionsBrand = allTerms.some(t => feedbackLower.includes(t.toLowerCase()));
-if (!mentionsBrand && (item.confidence || 0) < 0.85) continue;
+```sql
+CREATE POLICY "Authenticated users can delete clusters"
+ON public.clusters
+FOR DELETE
+USING (true);
 ```
 
 ## Files Changed
 
 | File | Change |
 |---|---|
-| `supabase/functions/collect-feedback/index.ts` | Smarter Twitter query with disambiguation, improved AI prompt, post-extraction brand validation |
+| `src/pages/InboxView.tsx` | Update `bulkDelete` to clean up orphaned clusters after deletion |
+| New migration | Add DELETE policy on clusters table |
 
 ## Expected Outcome
 
-- Twitter search will target SEO/content-related Conductor tweets, not the AI coding tool
-- AI extraction prompt will have enough context to distinguish between products sharing the name
-- Post-extraction validation will catch any remaining false positives
+- Deleting feedback in the Inbox will automatically remove any clusters that have zero remaining feedback items
+- Clusters with remaining feedback will have their `feedback_count` updated
+- The Clusters view will stay in sync with the Inbox
+
