@@ -481,16 +481,18 @@ serve(async (req) => {
 
     console.log(`Starting collection for ${company.name} with ${queries.length} queries (limit: ${webQueryLimit}), sources: ${collectionSources.join(", ")}`);
 
-    // ===== Phase 1: Firecrawl Web Search =====
+    // URL deduplication across all phases
+    const scrapedUrls = new Set<string>();
+
+    // ===== Phase 1: Firecrawl Web Search (Parallel Batched) =====
     if (collectionSources.includes("web")) {
       console.log("Starting web collection phase...");
-      for (const q of queries.slice(0, webQueryLimit)) {
-        // Check time budget
-        const elapsed = Date.now() - startTime;
-        if (elapsed > webBudgetMs) {
-          console.log(`Web phase time budget exceeded (${elapsed}ms / ${webBudgetMs}ms), moving to next phase`);
-          break;
-        }
+
+      const processQuery = async (q: any) => {
+        let queryNew = 0;
+        let queryDupes = 0;
+        const queryTexts: string[] = [];
+
         try {
           console.log(`Searching: ${q.query_text}`);
           const searchRes = await fetch("https://api.firecrawl.dev/v1/search", {
@@ -505,7 +507,7 @@ serve(async (req) => {
 
           if (!searchRes.ok) {
             console.warn(`Search failed for "${q.query_text}": ${searchRes.status}`);
-            continue;
+            return { queryNew, queryDupes, queryTexts };
           }
 
           const searchData = await searchRes.json();
@@ -518,6 +520,13 @@ serve(async (req) => {
             const url = result.url || "";
             const urlLower = url.toLowerCase();
 
+            // URL deduplication
+            if (scrapedUrls.has(urlLower)) {
+              console.log(`Skipping duplicate URL: ${url}`);
+              continue;
+            }
+            scrapedUrls.add(urlLower);
+
             // URL-level relevance filtering
             const isOtherProductPage = urlLower.includes('/products/') &&
               !brandTerms.some((t: string) => urlLower.includes(t.toLowerCase()));
@@ -527,10 +536,26 @@ serve(async (req) => {
               continue;
             }
 
-            // Check brand mention
+            // Soft relevance check: brand terms, product terms, domain, or URL match
             const lowerContent = content.toLowerCase();
             const hasBrandMention = brandTerms.some((t: string) => lowerContent.includes(t.toLowerCase()));
-            if (!hasBrandMention) continue;
+            const productTerms = (company.product_terms as string[]) || [];
+            const hasProductMention = productTerms.some((t: string) => lowerContent.includes(t.toLowerCase()));
+            const hasDomainMention = company.domain ? lowerContent.includes(company.domain.toLowerCase()) : false;
+            const urlMentionsBrand = brandTerms.some((t: string) => urlLower.includes(t.toLowerCase()));
+
+            const isRelevant = hasBrandMention || hasProductMention || hasDomainMention || urlMentionsBrand;
+            if (!isRelevant) {
+              console.log(`Skipping page with no relevance signals: ${url}`);
+              continue;
+            }
+
+            // Build relevance context for AI prompt
+            const relevanceSignals: string[] = [];
+            if (hasBrandMention) relevanceSignals.push("brand name in content");
+            if (hasProductMention) relevanceSignals.push("product term in content");
+            if (hasDomainMention) relevanceSignals.push("domain in content");
+            if (urlMentionsBrand) relevanceSignals.push("brand name in URL");
 
             // Filter affiliate content
             const affiliateKeywords = ["affiliate", "sponsored post", "paid partnership", "commission"];
@@ -546,7 +571,7 @@ serve(async (req) => {
                   messages: [
                     {
                       role: "system",
-                      content: `You extract individual customer feedback items from web content about ${company.name}. Extract ONLY genuine user opinions, complaints, praise, or feature requests that are DIRECTLY about ${company.name} or its products (${brandTerms.join(', ')}). Do NOT extract reviews about other products even if they appear on the same page. Skip marketing copy, author bios, and navigation text. Every extracted item MUST be directly about ${company.name}. If the page is primarily reviewing a different product, return an empty items array. If the page URL or title clearly indicates this is a review page for ${company.name}, you can extract feedback even if the text doesn't explicitly mention the brand name.`,
+                      content: `You extract individual customer feedback items from web content about ${company.name}. This page was found via a web search for feedback about ${company.name}. Even if it's a blog post, newsletter, or community discussion that discusses the product indirectly, extract any user opinions or experiences mentioned. Relevance signals found: ${relevanceSignals.join(", ")}. Extract ONLY genuine user opinions, complaints, praise, or feature requests that are DIRECTLY about ${company.name} or its products (${brandTerms.join(', ')}). Do NOT extract reviews about other products even if they appear on the same page. Skip marketing copy, author bios, and navigation text. Every extracted item MUST be directly about ${company.name}. If the page is primarily reviewing a different product, return an empty items array.`,
                     },
                     {
                       role: "user",
@@ -601,15 +626,15 @@ serve(async (req) => {
                   console.warn("Rate limited, waiting 5s...");
                   await new Promise((r) => setTimeout(r, 5000));
                 }
-                continue;
+                return { queryNew, queryDupes, queryTexts };
               }
 
               const extractData = await extractRes.json();
               const toolCall = extractData.choices?.[0]?.message?.tool_calls?.[0];
-              if (!toolCall) continue;
+              if (!toolCall) return { queryNew, queryDupes, queryTexts };
 
               const { items } = JSON.parse(toolCall.function.arguments);
-              if (!items || !Array.isArray(items)) continue;
+              if (!items || !Array.isArray(items)) return { queryNew, queryDupes, queryTexts };
 
               // Determine source from URL
               let source = "Web";
@@ -617,6 +642,8 @@ serve(async (req) => {
               else if (urlLower.includes("g2.com")) source = "G2";
               else if (urlLower.includes("trustradius.com")) source = "TrustRadius";
               else if (urlLower.includes("capterra.com")) source = "Capterra";
+              else if (urlLower.includes("producthunt.com")) source = "ProductHunt";
+              else if (urlLower.includes("news.ycombinator.com")) source = "HackerNews";
 
               for (const item of items) {
                 if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.7) continue;
@@ -650,23 +677,46 @@ serve(async (req) => {
 
                 if (insertErr) {
                   if (insertErr.message?.includes("idx_feedback_content_hash")) {
-                    totalDuplicates++;
+                    queryDupes++;
                   } else {
                     console.warn("Insert error:", insertErr.message);
                   }
                 } else {
-                  totalNew++;
-                  allFeedbackTexts.push(item.text);
+                  queryNew++;
+                  queryTexts.push(item.text);
                 }
               }
             } catch (aiErr) {
               console.warn("AI extraction error:", aiErr);
             }
           }
-
-          await new Promise((r) => setTimeout(r, 1000));
         } catch (searchErr) {
           console.warn(`Query error for "${q.query_text}":`, searchErr);
+        }
+
+        return { queryNew, queryDupes, queryTexts };
+      };
+
+      // Process queries in parallel batches of 3
+      const queriesToProcess = queries.slice(0, webQueryLimit);
+      const batchSize = 3;
+      for (let i = 0; i < queriesToProcess.length; i += batchSize) {
+        const elapsed = Date.now() - startTime;
+        if (elapsed > webBudgetMs) {
+          console.log(`Web phase time budget exceeded (${elapsed}ms / ${webBudgetMs}ms), moving to next phase`);
+          break;
+        }
+
+        const batch = queriesToProcess.slice(i, i + batchSize);
+        console.log(`Processing batch ${Math.floor(i / batchSize) + 1}: ${batch.length} queries`);
+        const results = await Promise.allSettled(batch.map(q => processQuery(q)));
+
+        for (const result of results) {
+          if (result.status === "fulfilled") {
+            totalNew += result.value.queryNew;
+            totalDuplicates += result.value.queryDupes;
+            allFeedbackTexts.push(...result.value.queryTexts);
+          }
         }
       }
     }

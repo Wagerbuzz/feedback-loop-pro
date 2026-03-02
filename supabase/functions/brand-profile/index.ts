@@ -114,7 +114,8 @@ serve(async (req) => {
     const profile = JSON.parse(toolCall.function.arguments);
 
     // Step 3: Generate search queries
-    const intentBuckets = [
+    // Targeted buckets use site constraints; discovery buckets always use open web
+    const targetedBuckets = [
       { intent: "pain", templates: ["{brand} frustrating", "{brand} issues", "{brand} problems"] },
       { intent: "churn", templates: ["{brand} switching from", "{brand} alternative", "left {brand} for"] },
       { intent: "comparison", templates: ["{brand} vs", "{brand} compared to", "{brand} competitor"] },
@@ -123,25 +124,53 @@ serve(async (req) => {
       { intent: "praise", templates: ["{brand} love", "{brand} great", "{brand} recommend"] },
     ];
 
-    const domainConstraints = ["site:reddit.com", "site:g2.com", "site:trustradius.com", ""];
+    const discoveryBuckets = [
+      { intent: "blog_review", templates: ["{brand} review blog", "{brand} honest review", "{brand} deep dive"] },
+      { intent: "newsletter", templates: ["{brand} newsletter review", "{brand} substack", "{brand} analysis"] },
+      { intent: "community", templates: ["{brand} forum discussion", "{brand} community feedback", "{brand} user experience"] },
+      { intent: "video", templates: ["{brand} review youtube", "{brand} walkthrough"] },
+      { intent: "case_study", templates: ["{brand} case study", "using {brand} for", "{brand} workflow"] },
+    ];
+
+    // Deterministic site constraints for targeted queries only
+    // Removed reddit (has dedicated phase), g2/trustradius (handled by direct scraping)
+    const siteConstraints = ["site:capterra.com", "site:producthunt.com", "site:news.ycombinator.com", ""];
     const queries: Array<{ query_text: string; intent_bucket: string; domain_target: string }> = [];
 
     const brandName = profile.brand_terms?.[0] || company_name;
+    let queryIndex = 0;
 
-    for (const bucket of intentBuckets) {
+    // Add targeted queries (~40%) with deterministic site cycling
+    for (const bucket of targetedBuckets) {
       for (const template of bucket.templates) {
-        if (queries.length >= 20) break;
+        if (queries.length >= 10) break; // Cap targeted at ~10
         const featureTerm = profile.feature_terms?.[Math.floor(Math.random() * (profile.feature_terms?.length || 1))] || "";
         const queryText = template.replace("{brand}", brandName).replace("{feature}", featureTerm);
-        const domainConstraint = domainConstraints[Math.floor(Math.random() * domainConstraints.length)];
-        const fullQuery = domainConstraint ? `${queryText} ${domainConstraint}` : queryText;
+        const siteConstraint = siteConstraints[queryIndex % siteConstraints.length];
+        queryIndex++;
+        const fullQuery = siteConstraint ? `${queryText} ${siteConstraint}` : queryText;
         queries.push({
           query_text: fullQuery,
           intent_bucket: bucket.intent,
-          domain_target: domainConstraint.replace("site:", "") || "web",
+          domain_target: siteConstraint.replace("site:", "") || "web",
         });
       }
-      if (queries.length >= 20) break;
+      if (queries.length >= 10) break;
+    }
+
+    // Add discovery queries (~60%) - always open web, no site constraint
+    for (const bucket of discoveryBuckets) {
+      for (const template of bucket.templates) {
+        if (queries.length >= 25) break;
+        const featureTerm = profile.feature_terms?.[Math.floor(Math.random() * (profile.feature_terms?.length || 1))] || "";
+        const queryText = template.replace("{brand}", brandName).replace("{feature}", featureTerm);
+        queries.push({
+          query_text: queryText,
+          intent_bucket: bucket.intent,
+          domain_target: "web",
+        });
+      }
+      if (queries.length >= 25) break;
     }
 
     const result = {
