@@ -1,16 +1,16 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { User, Building2, Plug, Bell } from 'lucide-react';
+import { Building2, Briefcase, Plug, Bell } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import TopBar from '@/components/TopBar';
-import ProfileSettings from '@/components/settings/ProfileSettings';
+import CompanySetup from '@/components/settings/CompanySetup';
 import WorkspaceSettings from '@/components/settings/WorkspaceSettings';
 import IntegrationsSettings from '@/components/settings/IntegrationsSettings';
 import NotificationSettings from '@/components/settings/NotificationSettings';
 
 const TABS = [
-  { id: 'profile', label: 'Profile', icon: User },
-  { id: 'workspace', label: 'Workspace', icon: Building2 },
+  { id: 'companies', label: 'Companies', icon: Building2 },
+  { id: 'workspace', label: 'Workspace', icon: Briefcase },
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'notifications', label: 'Notifications', icon: Bell },
 ] as const;
@@ -19,7 +19,7 @@ type TabId = (typeof TABS)[number]['id'];
 
 export default function SettingsView() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialTab = (searchParams.get('tab') as TabId) || 'profile';
+  const initialTab = (searchParams.get('tab') as TabId) || 'companies';
   const [activeTab, setActiveTab] = useState<TabId>(initialTab);
 
   useEffect(() => {
@@ -58,7 +58,7 @@ export default function SettingsView() {
 
         {/* Content */}
         <div className="flex-1 overflow-auto p-6">
-          {activeTab === 'profile' && <ProfileSettings />}
+          {activeTab === 'companies' && <CompanySetup />}
           {activeTab === 'workspace' && <WorkspaceSettings />}
           {activeTab === 'integrations' && <IntegrationsSettings />}
           {activeTab === 'notifications' && <NotificationSettings />}
