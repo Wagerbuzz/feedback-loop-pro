@@ -1,101 +1,66 @@
 
+# Reorganize Settings and Improve Company Management
 
-# Fix Feedback Deletion and Cluster Cleanup
+## Changes
 
-## Problems
+### 1. Make "Tracked Companies" its own settings tab
+Move CompanySetup out of Integrations and into a dedicated "Companies" tab in the settings sidebar. This gives it proper visibility as a core feature rather than being buried under integrations.
 
-### 1. Orphaned Clusters After Feedback Deletion
-When feedback is deleted from the Inbox, the associated clusters in the Clusters view remain untouched. The `clusters` table has no relationship to `feedback` that would trigger cleanup. Clusters show stale `feedback_count` values and reference feedback that no longer exists.
+### 2. Remove the Profile tab
+The Profile tab only has name/initials editing which isn't valuable enough to warrant its own section. Merge the profile fields (name, initials, email) into the top of the new default tab (Workspace or Companies).
 
-### 2. Re-collection Returns Fewer Items
-This is actually expected behavior, not a bug. Web search results are non-deterministic -- Google/Bing return different results each time. The deduplication (content_hash) correctly allows re-insertion of deleted items, but the search engine simply returns different pages on each run. However, we can improve the experience by clearly communicating this.
+### 3. Remove Twitter "requires API keys" label
+The Twitter source checkbox currently shows "requires API keys" which is an internal concern, not something the user needs to see. Remove that warning -- Twitter should just appear as another source option like Web and Reddit.
 
-## Solution
-
-### 1. Auto-cleanup orphaned clusters when feedback is deleted
-Add logic to the bulk delete flow in `InboxView.tsx` that, after deleting feedback, checks if any clusters have zero remaining feedback items and removes them. Also recalculate `feedback_count` on remaining clusters.
-
-### 2. Add a "Clean up clusters" step after deletion
-After bulk-deleting feedback, query the clusters table and remove any cluster whose `cluster_id` no longer appears in any feedback row. Update `feedback_count` for remaining clusters.
+### 4. Add delete company functionality
+Add a delete button to each company card with a confirmation dialog. Deleting a company should also clean up associated feedback, clusters, actions, and roadmap items.
 
 ## Technical Details
 
-### File: `src/pages/InboxView.tsx`
+### File: `src/pages/SettingsView.tsx`
+- Remove the `profile` tab from the TABS array
+- Add a new `companies` tab with a `Building2` icon
+- Change default tab from `profile` to `companies`
+- Import and render a new `CompaniesSettings` component (which is the existing `CompanySetup` with additions)
+- Move profile fields (name, initials, email, save button) into the Workspace tab
 
-Update the `bulkDelete` function to also clean up orphaned clusters after deleting feedback:
+### File: `src/components/settings/WorkspaceSettings.tsx`
+- Merge in the profile editing form (name, initials, email) from ProfileSettings
+- Keep existing workspace fields below
 
-```typescript
-const bulkDelete = async () => {
-  setBulkUpdating(true);
-  const ids = [...selectedIds];
-  
-  // Get the cluster_ids of feedback being deleted (for cleanup)
-  const affectedClusterIds = feedback
-    .filter(f => ids.includes(f.id) && f.cluster_id)
-    .map(f => f.cluster_id!);
-  
-  // Delete the feedback
-  const { error } = await supabase
-    .from('feedback')
-    .delete()
-    .in('id', ids);
+### File: `src/components/settings/ProfileSettings.tsx`
+- Delete this file (merged into WorkspaceSettings)
 
-  if (error) {
-    toast({ title: 'Bulk delete failed', description: error.message, variant: 'destructive' });
-  } else {
-    toast({ title: `Deleted ${ids.length} items` });
-    setSelectedIds(new Set());
-    
-    // Clean up orphaned clusters
-    if (affectedClusterIds.length > 0 && activeCompany) {
-      const uniqueClusterIds = [...new Set(affectedClusterIds)];
-      for (const clusterId of uniqueClusterIds) {
-        // Count remaining feedback with this cluster_id
-        const { count } = await supabase
-          .from('feedback')
-          .select('*', { count: 'exact', head: true })
-          .eq('company_id', activeCompany.id)
-          .eq('cluster_id', clusterId);
-        
-        if (count === 0) {
-          // No feedback left for this cluster - delete it
-          await supabase.from('clusters').delete().eq('cluster_id', clusterId);
-        } else {
-          // Update the feedback_count
-          await supabase.from('clusters')
-            .update({ feedback_count: count })
-            .eq('cluster_id', clusterId);
-        }
-      }
-    }
-    
-    await fetchFeedback();
-  }
-  setBulkUpdating(false);
-};
-```
+### File: `src/components/settings/CompanySetup.tsx`
+- Remove Twitter "requires API keys" warning from `SOURCE_OPTIONS` display
+- Add a delete button (Trash2 icon) to each company card header
+- Add an AlertDialog confirmation before deleting
+- On delete: remove the company from `companies` table (cascade will handle feedback, clusters, etc. if foreign keys exist; otherwise manually delete associated data by `company_id`)
+- After deletion, call `refetchCompanies()` from CompanyContext to update the sidebar brand switcher
 
-### Database: Add DELETE policy for clusters table
+### File: `src/components/settings/IntegrationsSettings.tsx`
+- Remove the `<CompanySetup />` import and rendering -- it now lives under its own tab
 
-The `clusters` table currently has no DELETE RLS policy. We need to add one so the UI can remove orphaned clusters.
+### Database
+- No schema changes needed. The `companies` table already has a DELETE RLS policy for the owner.
+- Feedback, clusters, actions, and roadmap tables use `company_id` but without foreign keys, so we need to manually delete associated records when a company is deleted.
 
-```sql
-CREATE POLICY "Authenticated users can delete clusters"
-ON public.clusters
-FOR DELETE
-USING (true);
+## Updated Settings Tabs
+
+```text
+Before:                After:
+- Profile              - Companies (new, default)
+- Workspace            - Workspace (now includes profile fields)
+- Integrations         - Integrations (without CompanySetup)
+- Notifications        - Notifications
 ```
 
 ## Files Changed
 
 | File | Change |
 |---|---|
-| `src/pages/InboxView.tsx` | Update `bulkDelete` to clean up orphaned clusters after deletion |
-| New migration | Add DELETE policy on clusters table |
-
-## Expected Outcome
-
-- Deleting feedback in the Inbox will automatically remove any clusters that have zero remaining feedback items
-- Clusters with remaining feedback will have their `feedback_count` updated
-- The Clusters view will stay in sync with the Inbox
-
+| `src/pages/SettingsView.tsx` | Replace Profile tab with Companies tab, update default |
+| `src/components/settings/WorkspaceSettings.tsx` | Merge profile editing from ProfileSettings |
+| `src/components/settings/ProfileSettings.tsx` | Delete file |
+| `src/components/settings/IntegrationsSettings.tsx` | Remove CompanySetup import/render |
+| `src/components/settings/CompanySetup.tsx` | Add delete company with confirmation, remove Twitter API key warning, cascade-delete associated data |
