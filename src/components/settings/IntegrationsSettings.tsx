@@ -5,7 +5,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { MessageSquare, Headphones, Hash, FileUp, Code } from 'lucide-react';
-import CompanySetup from './CompanySetup';
 
 const PROVIDERS = [
   { id: 'zendesk', name: 'Zendesk', description: 'Import support tickets', icon: Headphones },
@@ -46,7 +45,6 @@ export default function IntegrationsSettings() {
     if (!user) return;
     const existing = integrations.find((i) => i.provider === providerId);
     if (existing && existing.status === 'connected') {
-      // Disconnect
       const { error } = await supabase
         .from('integrations')
         .update({ status: 'disconnected', connected_at: null })
@@ -58,7 +56,6 @@ export default function IntegrationsSettings() {
         toast.success(`${providerName} disconnected`);
       }
     } else if (existing) {
-      // Reconnect
       const { error } = await supabase
         .from('integrations')
         .update({ status: 'connected', connected_at: new Date().toISOString() })
@@ -70,7 +67,6 @@ export default function IntegrationsSettings() {
         toast.success(`${providerName} connected`);
       }
     } else {
-      // Create new
       const { data, error } = await supabase
         .from('integrations')
         .insert({ user_id: user.id, provider: providerId, display_name: providerName, status: 'connected', connected_at: new Date().toISOString() })
@@ -84,11 +80,8 @@ export default function IntegrationsSettings() {
   };
 
   return (
-    <div className="space-y-8">
-      {/* Company Setup section */}
-      <CompanySetup />
-
-      <div className="border-t border-border pt-6">
+    <div className="space-y-6">
+      <div>
         <h2 className="text-lg font-semibold">Integrations</h2>
         <p className="text-sm text-muted-foreground">Connect your feedback sources to start importing data.</p>
       </div>

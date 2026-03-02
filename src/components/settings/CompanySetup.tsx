@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
+import { useCompany } from '@/contexts/CompanyContext';
 import { profileBrand, collectFeedback } from '@/lib/api/collection';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,8 +10,9 @@ import { Progress } from '@/components/ui/progress';
 import { Switch } from '@/components/ui/switch';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { toast } from 'sonner';
-import { Building2, Globe, Plus, Loader2, Play, Clock, CheckCircle2, XCircle, CalendarClock, AlertCircle } from 'lucide-react';
+import { Building2, Globe, Plus, Loader2, Play, Clock, CheckCircle2, XCircle, CalendarClock, Trash2 } from 'lucide-react';
 
 interface Company {
   id: string;
@@ -45,6 +47,7 @@ const SOURCE_OPTIONS = [
 
 export default function CompanySetup() {
   const { user } = useAuth();
+  const { refetchCompanies } = useCompany();
   const [companies, setCompanies] = useState<Company[]>([]);
   const [runs, setRuns] = useState<Record<string, CollectionRun[]>>({});
   const [loading, setLoading] = useState(true);
@@ -55,7 +58,7 @@ export default function CompanySetup() {
   const [newDomain, setNewDomain] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [twitterConfigured, setTwitterConfigured] = useState<boolean | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -185,6 +188,29 @@ export default function CompanySetup() {
     setCompanies(cs => cs.map(c => c.id === company.id ? { ...c, collection_sources: updated } : c));
   };
 
+  const handleDelete = async (company: Company) => {
+    setDeleting(company.id);
+    try {
+      // Manually delete associated data (no cascade FKs for all tables)
+      await Promise.all([
+        supabase.from('feedback').delete().eq('company_id', company.id),
+        supabase.from('clusters').delete().eq('company_id', company.id),
+        supabase.from('actions').delete().eq('company_id', company.id),
+        supabase.from('roadmap').delete().eq('company_id', company.id),
+        supabase.from('collection_runs').delete().eq('company_id', company.id),
+      ]);
+      const { error } = await supabase.from('companies').delete().eq('id', company.id);
+      if (error) throw error;
+      toast.success(`${company.name} deleted`);
+      await loadCompanies();
+      await refetchCompanies();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to delete company');
+    } finally {
+      setDeleting(null);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -289,6 +315,27 @@ export default function CompanySetup() {
                         <><Play className="w-3.5 h-3.5" /> Collect Now</>
                       )}
                     </Button>
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive" disabled={deleting === company.id}>
+                          {deleting === company.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Delete {company.name}?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            This will permanently delete this company and all associated feedback, clusters, actions, and roadmap items. This action cannot be undone.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogAction onClick={() => handleDelete(company)} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                            Delete
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
                   </div>
                 </div>
 
@@ -319,9 +366,8 @@ export default function CompanySetup() {
                 <div className="mt-3 border-t border-border pt-3">
                   <div className="text-xs text-muted-foreground mb-2">Collection Sources</div>
                   <div className="flex flex-wrap gap-3">
-                    {SOURCE_OPTIONS.map((src) => {
+                     {SOURCE_OPTIONS.map((src) => {
                       const isEnabled = sources.includes(src.id);
-                      const isTwitter = src.id === 'twitter';
 
                       return (
                         <label key={src.id} className="flex items-center gap-1.5 text-xs cursor-pointer">
@@ -330,12 +376,6 @@ export default function CompanySetup() {
                             onCheckedChange={(checked) => toggleSource(company, src.id, !!checked)}
                           />
                           <span>{src.label}</span>
-                          {isTwitter && !src.alwaysAvailable && (
-                            <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground">
-                              <AlertCircle className="w-3 h-3" />
-                              requires API keys
-                            </span>
-                          )}
                         </label>
                       );
                     })}
