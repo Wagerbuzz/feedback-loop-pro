@@ -14,6 +14,185 @@ async function hashText(text: string): Promise<string> {
   return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// Direct review site scraping - construct known review URLs and scrape them directly
+async function collectDirectReviews(
+  company: any,
+  brandTerms: string[],
+  supabaseClient: any,
+  companyId: string,
+  lovableApiKey: string,
+  firecrawlApiKey: string,
+  scrapedUrls: Set<string>
+): Promise<{ newCount: number; dupeCount: number; texts: string[] }> {
+  let newCount = 0;
+  let dupeCount = 0;
+  const texts: string[] = [];
+
+  const brandName = brandTerms[0] || company.name;
+  const brandSlug = brandName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+
+  // Construct known review page URLs
+  const reviewUrls = [
+    { url: `https://www.g2.com/products/${brandSlug}/reviews`, source: "G2" },
+    { url: `https://www.g2.com/products/${brandSlug}/reviews?page=2`, source: "G2" },
+    { url: `https://www.trustradius.com/products/${brandSlug}/reviews`, source: "TrustRadius" },
+    { url: `https://www.capterra.com/reviews/${brandSlug}`, source: "Capterra" },
+    { url: `https://www.capterra.com/p/${brandSlug}/reviews`, source: "Capterra" },
+  ];
+
+  console.log(`Direct review scraping: ${reviewUrls.length} URLs for "${brandName}" (slug: ${brandSlug})`);
+
+  // Scrape all review URLs in parallel (they're independent)
+  const scrapeResults = await Promise.allSettled(
+    reviewUrls.map(async ({ url, source }) => {
+      const urlLower = url.toLowerCase();
+      if (scrapedUrls.has(urlLower)) {
+        console.log(`Direct scrape: skipping duplicate URL: ${url}`);
+        return { url, source, content: "", skipped: true };
+      }
+      scrapedUrls.add(urlLower);
+
+      try {
+        console.log(`Direct scrape: ${url}`);
+        const scrapeRes = await fetch("https://api.firecrawl.dev/v1/scrape", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${firecrawlApiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true }),
+        });
+
+        if (!scrapeRes.ok) {
+          console.warn(`Direct scrape failed (${scrapeRes.status}): ${url}`);
+          return { url, source, content: "", skipped: false };
+        }
+
+        const scrapeData = await scrapeRes.json();
+        const content = scrapeData?.data?.markdown || scrapeData?.markdown || "";
+        return { url, source, content, skipped: false };
+      } catch (err) {
+        console.warn(`Direct scrape error for ${url}:`, err);
+        return { url, source, content: "", skipped: false };
+      }
+    })
+  );
+
+  // Process scraped content through AI extraction
+  for (const result of scrapeResults) {
+    if (result.status !== "fulfilled") continue;
+    const { url, source, content, skipped } = result.value;
+    if (skipped || content.length < 300) continue;
+
+    try {
+      const extractRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${lovableApiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [
+            {
+              role: "system",
+              content: `You extract individual customer feedback items from ${source} review pages about ${company.name}. This is a direct review page for ${company.name}, so all reviews on this page should be about this product. Extract each individual review as a separate feedback item. Include the reviewer's name if available. Extract ONLY genuine user reviews - skip editorial content, marketing copy, and navigation text.`,
+            },
+            {
+              role: "user",
+              content: `Extract all individual reviews about ${company.name} from this ${source} page:\n\nURL: ${url}\n\n${content.slice(0, 8000)}`,
+            },
+          ],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "extract_feedback",
+                description: "Extract structured feedback items from review page",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    items: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          author: { type: "string", description: "Reviewer name or anonymous" },
+                          text: { type: "string", description: "The review text (50-300 chars)" },
+                          sentiment: { type: "string", enum: ["Positive", "Negative", "Neutral"] },
+                          confidence: { type: "number", description: "Confidence 0-1" },
+                          pain_point_category: {
+                            type: "string",
+                            enum: ["UX", "Pricing", "Reliability", "Performance", "Documentation", "Features", "Support", "Security", "Integration", "Other"],
+                          },
+                          intent_type: {
+                            type: "string",
+                            enum: ["praise", "bug", "feature_request", "churn_risk", "comparison", "general"],
+                          },
+                          context_excerpt: { type: "string", description: "Surrounding context (100 chars)" },
+                        },
+                        required: ["author", "text", "sentiment", "confidence", "pain_point_category", "intent_type"],
+                        additionalProperties: false,
+                      },
+                    },
+                  },
+                  required: ["items"],
+                  additionalProperties: false,
+                },
+              },
+            },
+          ],
+          tool_choice: { type: "function", function: { name: "extract_feedback" } },
+        }),
+      });
+
+      if (!extractRes.ok) {
+        if (extractRes.status === 429) await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+
+      const extractData = await extractRes.json();
+      const toolCall = extractData.choices?.[0]?.message?.tool_calls?.[0];
+      if (!toolCall) continue;
+
+      const { items } = JSON.parse(toolCall.function.arguments);
+      if (!items || !Array.isArray(items)) continue;
+
+      for (const item of items) {
+        if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.6) continue;
+
+        const contentHash = await hashText(item.text);
+
+        const feedbackRow = {
+          feedback_id: `DIR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          text: item.text.slice(0, 500),
+          customer_name: item.author || "Anonymous",
+          source,
+          sentiment: item.sentiment || "Neutral",
+          status: "New",
+          channel: source,
+          company_id: companyId,
+          source_url: url,
+          content_hash: contentHash,
+          pain_point_category: item.pain_point_category,
+          intent_type: item.intent_type,
+          confidence_score: item.confidence || 0.5,
+          original_context_excerpt: item.context_excerpt?.slice(0, 200) || null,
+        };
+
+        const { error: insertErr } = await supabaseClient.from("feedback").insert(feedbackRow);
+
+        if (insertErr) {
+          if (insertErr.message?.includes("idx_feedback_content_hash")) dupeCount++;
+          else console.warn("Direct review insert error:", insertErr.message);
+        } else {
+          newCount++;
+          texts.push(item.text);
+        }
+      }
+    } catch (aiErr) {
+      console.warn("Direct review AI extraction error:", aiErr);
+    }
+  }
+
+  console.log(`Direct review scraping: ${newCount} new, ${dupeCount} dupes`);
+  return { newCount, dupeCount, texts };
+}
+
 // Reddit collection via Firecrawl search (direct Reddit API is blocked with 403)
 async function collectRedditFeedback(
   company: any,
@@ -483,6 +662,16 @@ serve(async (req) => {
 
     // URL deduplication across all phases
     const scrapedUrls = new Set<string>();
+
+    // ===== Phase 0: Direct Review Site Scraping =====
+    if (collectionSources.includes("web")) {
+      console.log("Starting direct review scraping phase...");
+      const directResult = await collectDirectReviews(company, brandTerms, supabase, company_id, LOVABLE_API_KEY, FIRECRAWL_API_KEY, scrapedUrls);
+      totalNew += directResult.newCount;
+      totalDuplicates += directResult.dupeCount;
+      allFeedbackTexts.push(...directResult.texts);
+      console.log(`Direct review phase complete (elapsed: ${Date.now() - startTime}ms)`);
+    }
 
     // ===== Phase 1: Firecrawl Web Search (Parallel Batched) =====
     if (collectionSources.includes("web")) {
