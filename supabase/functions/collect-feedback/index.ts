@@ -14,13 +14,14 @@ async function hashText(text: string): Promise<string> {
   return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Reddit public JSON API - no API key required
+// Reddit collection via Firecrawl search (direct Reddit API is blocked with 403)
 async function collectRedditFeedback(
   company: any,
   brandTerms: string[],
   supabaseClient: any,
   companyId: string,
-  lovableApiKey: string
+  lovableApiKey: string,
+  firecrawlApiKey: string
 ): Promise<{ newCount: number; dupeCount: number; texts: string[] }> {
   let newCount = 0;
   let dupeCount = 0;
@@ -60,71 +61,44 @@ async function collectRedditFeedback(
     }
   }
 
-  // Build search URLs: general search + specific subreddits
-  const searchUrls: string[] = [
-    `https://www.reddit.com/search.json?q=${encodeURIComponent(brandName)}&sort=relevance&limit=25&t=year`,
+  // Build Firecrawl search queries targeting Reddit
+  const redditQueries: string[] = [
+    `${brandName} site:reddit.com`,
   ];
-  for (const sub of subreddits.slice(0, 5)) {
-    searchUrls.push(
-      `https://www.reddit.com/r/${sub}/search.json?q=${encodeURIComponent(brandName)}&restrict_sr=1&sort=relevance&limit=15&t=year`
-    );
+  for (const sub of subreddits.slice(0, 4)) {
+    redditQueries.push(`${brandName} site:reddit.com/r/${sub}`);
   }
 
-  const seenPostIds = new Set<string>();
-
-  for (const searchUrl of searchUrls) {
+  for (const query of redditQueries) {
     try {
-      console.log(`Reddit search: ${searchUrl}`);
-      const res = await fetch(searchUrl, {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; FeedbackBot/1.0)" },
+      console.log(`Reddit via Firecrawl: ${query}`);
+      const searchRes = await fetch("https://api.firecrawl.dev/v1/search", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${firecrawlApiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query,
+          limit: 5,
+          scrapeOptions: { formats: ["markdown"] },
+        }),
       });
 
-      if (!res.ok) {
-        console.warn(`Reddit search failed: ${res.status} ${res.statusText} for ${searchUrl}`);
+      if (!searchRes.ok) {
+        console.warn(`Reddit Firecrawl search failed: ${searchRes.status} for "${query}"`);
         continue;
       }
 
-      const data = await res.json();
-      const posts = data?.data?.children || [];
+      const searchData = await searchRes.json();
+      const results = searchData?.data || [];
+      console.log(`Reddit Firecrawl: ${results.length} results for "${query}"`);
 
-      for (const post of posts) {
-        const postData = post.data;
-        if (!postData || seenPostIds.has(postData.id)) continue;
-        seenPostIds.add(postData.id);
+      for (const result of results) {
+        const content = result.markdown || "";
+        if (content.length < 200) continue;
 
-        // Fetch comments for this post
+        const url = result.url || "";
+
+        // Extract feedback via AI
         try {
-          await new Promise((r) => setTimeout(r, 1200)); // Rate limit: ~60 req/min
-          const commentsRes = await fetch(
-            `https://www.reddit.com/comments/${postData.id}.json?limit=20&sort=top`,
-            { headers: { "User-Agent": "Mozilla/5.0 (compatible; FeedbackBot/1.0)" } }
-          );
-
-          if (!commentsRes.ok) continue;
-
-          const commentsData = await commentsRes.json();
-
-          // Collect post title + selftext and top comments
-          const contentParts: string[] = [];
-          contentParts.push(`Post: ${postData.title}\n${postData.selftext || ""}`);
-
-          const comments = commentsData?.[1]?.data?.children || [];
-          for (const comment of comments) {
-            const c = comment.data;
-            if (c && c.body && c.body.length > 20) {
-              contentParts.push(`Comment by u/${c.author}: ${c.body}`);
-            }
-          }
-
-          const fullContent = contentParts.join("\n\n");
-          if (fullContent.length < 100) continue;
-
-          // Check brand mention in content
-          const lowerContent = fullContent.toLowerCase();
-          const hasBrandMention = brandTerms.some((t) => lowerContent.includes(t.toLowerCase()));
-          if (!hasBrandMention) continue;
-
-          // Extract feedback via AI
           const extractRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
             method: "POST",
             headers: { Authorization: `Bearer ${lovableApiKey}`, "Content-Type": "application/json" },
@@ -133,11 +107,11 @@ async function collectRedditFeedback(
               messages: [
                 {
                   role: "system",
-                  content: `You extract individual customer feedback items from Reddit content about ${company.name}. Extract ONLY genuine user opinions, complaints, praise, or feature requests that are DIRECTLY about ${company.name} or its products (${brandTerms.join(", ")}). Do NOT extract opinions about other products. Skip generic or off-topic comments.`,
+                  content: `You extract individual customer feedback items from Reddit content about ${company.name}. Extract ONLY genuine user opinions, complaints, praise, or feature requests that are DIRECTLY about ${company.name} or its products (${brandTerms.join(", ")}). Do NOT extract opinions about other products. Skip generic or off-topic comments. If the page URL or title clearly indicates this is a discussion about ${company.name}, you can extract feedback even if the text doesn't explicitly repeat the brand name.`,
                 },
                 {
                   role: "user",
-                  content: `Extract feedback items ONLY about ${company.name} from this Reddit thread:\n\n${fullContent.slice(0, 6000)}`,
+                  content: `Extract feedback items ONLY about ${company.name} from this Reddit page:\n\nURL: ${url}\n\n${content.slice(0, 6000)}`,
                 },
               ],
               tools: [
@@ -195,14 +169,12 @@ async function collectRedditFeedback(
           const { items } = JSON.parse(toolCall.function.arguments);
           if (!items || !Array.isArray(items)) continue;
 
-          const permalink = `https://www.reddit.com${postData.permalink}`;
-
           for (const item of items) {
             if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.7) continue;
 
             const feedbackLower = item.text.toLowerCase();
             const mentionsBrand = brandTerms.some((t) => feedbackLower.includes(t.toLowerCase()));
-            if (!mentionsBrand && (item.confidence || 0) < 0.9) continue;
+            if (!mentionsBrand && (item.confidence || 0) < 0.8) continue;
 
             const contentHash = await hashText(item.text);
 
@@ -215,7 +187,7 @@ async function collectRedditFeedback(
               status: "New",
               channel: "Reddit",
               company_id: companyId,
-              source_url: permalink,
+              source_url: url,
               content_hash: contentHash,
               pain_point_category: item.pain_point_category,
               intent_type: item.intent_type,
@@ -233,14 +205,12 @@ async function collectRedditFeedback(
               texts.push(item.text);
             }
           }
-        } catch (commentErr) {
-          console.warn("Reddit comment fetch error:", commentErr);
+        } catch (aiErr) {
+          console.warn("Reddit AI extraction error:", aiErr);
         }
       }
-
-      await new Promise((r) => setTimeout(r, 1200));
     } catch (searchErr) {
-      console.warn("Reddit search error:", searchErr);
+      console.warn("Reddit Firecrawl search error:", searchErr);
     }
   }
 
@@ -506,8 +476,8 @@ serve(async (req) => {
     const startTime = Date.now();
     const TIME_BUDGET_MS = 55000; // 55s total (leave 5s margin)
     const hasMultipleSources = collectionSources.length > 1;
-    const webQueryLimit = hasMultipleSources ? 15 : 25;
-    const webBudgetMs = hasMultipleSources ? 30000 : 45000;
+    const webQueryLimit = hasMultipleSources ? 20 : 25;
+    const webBudgetMs = hasMultipleSources ? 40000 : 50000;
 
     console.log(`Starting collection for ${company.name} with ${queries.length} queries (limit: ${webQueryLimit}), sources: ${collectionSources.join(", ")}`);
 
@@ -528,7 +498,7 @@ serve(async (req) => {
             headers: { Authorization: `Bearer ${FIRECRAWL_API_KEY}`, "Content-Type": "application/json" },
             body: JSON.stringify({
               query: q.query_text,
-              limit: 10,
+              limit: 15,
               scrapeOptions: { formats: ["markdown"] },
             }),
           });
@@ -576,7 +546,7 @@ serve(async (req) => {
                   messages: [
                     {
                       role: "system",
-                      content: `You extract individual customer feedback items from web content about ${company.name}. Extract ONLY genuine user opinions, complaints, praise, or feature requests that are DIRECTLY about ${company.name} or its products (${brandTerms.join(', ')}). Do NOT extract reviews about other products even if they appear on the same page. Skip marketing copy, author bios, and navigation text. Every extracted item MUST be directly about ${company.name}. If the page is primarily reviewing a different product, return an empty items array.`,
+                      content: `You extract individual customer feedback items from web content about ${company.name}. Extract ONLY genuine user opinions, complaints, praise, or feature requests that are DIRECTLY about ${company.name} or its products (${brandTerms.join(', ')}). Do NOT extract reviews about other products even if they appear on the same page. Skip marketing copy, author bios, and navigation text. Every extracted item MUST be directly about ${company.name}. If the page is primarily reviewing a different product, return an empty items array. If the page URL or title clearly indicates this is a review page for ${company.name}, you can extract feedback even if the text doesn't explicitly mention the brand name.`,
                     },
                     {
                       role: "user",
@@ -653,7 +623,7 @@ serve(async (req) => {
 
                 const feedbackLower = item.text.toLowerCase();
                 const mentionsBrand = brandTerms.some((t: string) => feedbackLower.includes(t.toLowerCase()));
-                if (!mentionsBrand && (item.confidence || 0) < 0.9) {
+                if (!mentionsBrand && (item.confidence || 0) < 0.8) {
                   console.log(`Skipping feedback not mentioning brand: "${item.text.slice(0, 60)}..."`);
                   continue;
                 }
@@ -704,7 +674,7 @@ serve(async (req) => {
     // ===== Phase 2: Reddit Collection =====
     console.log(`Starting Reddit collection phase... (elapsed: ${Date.now() - startTime}ms)`);
     if (Date.now() - startTime < TIME_BUDGET_MS) {
-      const redditResult = await collectRedditFeedback(company, brandTerms, supabase, company_id, LOVABLE_API_KEY);
+      const redditResult = await collectRedditFeedback(company, brandTerms, supabase, company_id, LOVABLE_API_KEY, FIRECRAWL_API_KEY);
       totalNew += redditResult.newCount;
       totalDuplicates += redditResult.dupeCount;
       allFeedbackTexts.push(...redditResult.texts);
