@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCompany } from '@/contexts/CompanyContext';
-import { profileBrand, collectFeedback } from '@/lib/api/collection';
+import { profileBrand, collectFeedback, lookupReviewUrls } from '@/lib/api/collection';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -12,7 +12,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { toast } from 'sonner';
-import { Building2, Globe, Plus, Loader2, Play, Clock, CheckCircle2, XCircle, CalendarClock, Trash2 } from 'lucide-react';
+import { Building2, Globe, Plus, Loader2, Play, Clock, CheckCircle2, XCircle, CalendarClock, Trash2, ExternalLink } from 'lucide-react';
 
 interface Company {
   id: string;
@@ -26,6 +26,11 @@ interface Company {
   collection_frequency: string;
   collection_sources: string[] | null;
   reddit_subreddits: string[] | null;
+  g2_url: string | null;
+  capterra_url: string | null;
+  trustradius_url: string | null;
+  getapp_url: string | null;
+  review_urls_verified_at: string | null;
 }
 
 interface CollectionRun {
@@ -45,6 +50,13 @@ const SOURCE_OPTIONS = [
   { id: 'twitter', label: 'Twitter / X', alwaysAvailable: false },
 ];
 
+const REVIEW_URL_FIELDS = [
+  { key: 'g2_url', label: 'G2', placeholder: 'https://www.g2.com/products/your-product/reviews' },
+  { key: 'capterra_url', label: 'Capterra', placeholder: 'https://www.capterra.com/p/12345/your-product/' },
+  { key: 'trustradius_url', label: 'TrustRadius', placeholder: 'https://www.trustradius.com/products/your-product/reviews' },
+  { key: 'getapp_url', label: 'GetApp', placeholder: 'https://www.getapp.com/software/your-product/' },
+] as const;
+
 export default function CompanySetup() {
   const { user } = useAuth();
   const { refetchCompanies } = useCompany();
@@ -59,6 +71,8 @@ export default function CompanySetup() {
   const [showForm, setShowForm] = useState(false);
   const [progress, setProgress] = useState(0);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [expandedUrls, setExpandedUrls] = useState<Set<string>>(new Set());
+  const [lookingUpUrls, setLookingUpUrls] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -74,7 +88,6 @@ export default function CompanySetup() {
     setCompanies((data as any[]) ?? []);
     setLoading(false);
 
-    // Load runs for each company
     if (data && data.length > 0) {
       const { data: allRuns } = await supabase
         .from('collection_runs')
@@ -124,13 +137,28 @@ export default function CompanySetup() {
           search_queries: profile.search_queries,
           reddit_subreddits: profile.reddit_subreddits || [],
           collection_sources: ['web', 'reddit'],
-        })
+        } as any)
         .select()
         .single();
 
-      setProgress(100);
+      setProgress(80);
 
       if (error) throw new Error(error.message);
+
+      // Auto-lookup review URLs after creating the company
+      if (inserted && profile.should_lookup_review_urls) {
+        try {
+          toast.info('Looking up review site URLs...');
+          const urlResult = await lookupReviewUrls(inserted.id);
+          if (urlResult?.found > 0) {
+            toast.success(`Found ${urlResult.found} review site URL(s)`);
+          }
+        } catch (urlErr) {
+          console.warn('Review URL lookup failed (non-critical):', urlErr);
+        }
+      }
+
+      setProgress(100);
 
       toast.success(`${newName} added with ${profile.search_queries?.length || 0} search queries and ${profile.reddit_subreddits?.length || 0} subreddits`);
       setNewName('');
@@ -191,7 +219,6 @@ export default function CompanySetup() {
   const handleDelete = async (company: Company) => {
     setDeleting(company.id);
     try {
-      // Manually delete associated data (no cascade FKs for all tables)
       await Promise.all([
         supabase.from('feedback').delete().eq('company_id', company.id),
         supabase.from('clusters').delete().eq('company_id', company.id),
@@ -209,6 +236,38 @@ export default function CompanySetup() {
     } finally {
       setDeleting(null);
     }
+  };
+
+  const handleUpdateReviewUrl = async (companyId: string, field: string, value: string) => {
+    const update: Record<string, string | null> = { [field]: value.trim() || null };
+    await supabase.from('companies').update(update as any).eq('id', companyId);
+    setCompanies(cs => cs.map(c => c.id === companyId ? { ...c, [field]: value.trim() || null } as any : c));
+  };
+
+  const handleLookupUrls = async (company: Company) => {
+    setLookingUpUrls(company.id);
+    try {
+      const result = await lookupReviewUrls(company.id);
+      if (result?.found > 0) {
+        toast.success(`Found ${result.found} review site URL(s)`);
+        await loadCompanies();
+      } else {
+        toast.info('No review site URLs found automatically. You can add them manually.');
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'URL lookup failed');
+    } finally {
+      setLookingUpUrls(null);
+    }
+  };
+
+  const toggleUrlSection = (companyId: string) => {
+    setExpandedUrls(prev => {
+      const next = new Set(prev);
+      if (next.has(companyId)) next.delete(companyId);
+      else next.add(companyId);
+      return next;
+    });
   };
 
   return (
@@ -284,6 +343,8 @@ export default function CompanySetup() {
             const isCollecting = collecting === company.id;
             const companyRuns = runs[company.id] || [];
             const sources = (company.collection_sources as string[]) || ['web', 'reddit'];
+            const urlsExpanded = expandedUrls.has(company.id);
+            const hasAnyUrl = company.g2_url || company.capterra_url || company.trustradius_url || company.getapp_url;
 
             return (
               <div key={company.id} className="bg-card border border-border rounded-lg p-4">
@@ -359,6 +420,50 @@ export default function CompanySetup() {
                   )}
                   {(company.reddit_subreddits as any[])?.length > 0 && (
                     <div>{(company.reddit_subreddits as any[]).length} subreddits</div>
+                  )}
+                </div>
+
+                {/* Review Site URLs */}
+                <div className="mt-3 border-t border-border pt-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <button
+                      onClick={() => toggleUrlSection(company.id)}
+                      className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      Review Site URLs
+                      {hasAnyUrl && <Badge variant="secondary" className="text-[9px] ml-1 px-1 py-0">configured</Badge>}
+                    </button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 text-[10px] px-2"
+                      onClick={() => handleLookupUrls(company)}
+                      disabled={lookingUpUrls === company.id}
+                    >
+                      {lookingUpUrls === company.id ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+                      Auto-detect
+                    </Button>
+                  </div>
+                  {urlsExpanded && (
+                    <div className="space-y-2">
+                      {REVIEW_URL_FIELDS.map((field) => (
+                        <div key={field.key} className="flex items-center gap-2">
+                          <label className="text-[10px] text-muted-foreground w-16 shrink-0">{field.label}</label>
+                          <Input
+                            value={(company as any)[field.key] || ''}
+                            onChange={(e) => handleUpdateReviewUrl(company.id, field.key, e.target.value)}
+                            placeholder={field.placeholder}
+                            className="h-7 text-[11px] bg-muted border-border"
+                          />
+                        </div>
+                      ))}
+                      {company.review_urls_verified_at && (
+                        <div className="text-[10px] text-muted-foreground">
+                          Last verified: {new Date(company.review_urls_verified_at).toLocaleDateString()}
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
 

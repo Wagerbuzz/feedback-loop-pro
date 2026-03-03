@@ -7,21 +7,21 @@
 | # | Improvement | Spec Status | Current State |
 |---|---|---|---|
 | 1 | Queue-Based Architecture | Critical | **Not implemented.** Still a monolithic single function. No `collection_jobs` table. No orchestrator. No per-source retry. |
-| 2 | Persisted Review URLs | High | **Not implemented.** Phase 0 still constructs URLs via slug (lines 35-41). No `g2_url`, `capterra_url`, `trustradius_url`, `getapp_url` columns on `companies`. No `lookup-review-urls` function. No UI fields. |
-| 3 | Native Reddit JSON API | High | **Not implemented.** Reddit still uses Firecrawl search (lines 290-298). No upvote/score filtering. No `reddit_min_score` or `reddit_max_age_days` columns on `companies`. |
-| 4 | Semantic Deduplication | High | **Not implemented.** Still SHA-256 exact-match only (line 10-15). No `pgvector` extension. No `embedding` column on `feedback`. |
+| 2 | Persisted Review URLs | High | **✅ Implemented.** `g2_url`, `capterra_url`, `trustradius_url`, `getapp_url`, `review_urls_verified_at` columns on `companies`. `lookup-review-urls` edge function created. Phase 0 uses stored URLs with slug fallback. UI fields in CompanySetup. Auto-detection on company creation. |
+| 3 | Native Reddit JSON API | High | **✅ Implemented.** Replaced Firecrawl Reddit scraping with native `reddit.com/search.json` and `/r/{sub}/search.json` calls. Score filtering (`reddit_min_score` default 5), age filtering (`reddit_max_age_days` default 90). Batched AI extraction. Eliminates Firecrawl usage for Reddit. |
+| 4 | Semantic Deduplication | High | **Not implemented.** Still SHA-256 exact-match only. No `pgvector` extension. No `embedding` column on `feedback`. |
 | 5 | Two-Pass AI (Extract then Classify) | Medium | **Not implemented.** Still single-pass extraction+classification in one prompt (all phases). |
-| 6 | Incremental Clustering | Medium | **Not implemented.** Clustering rebuilds from scratch every run (lines 1009-1066). No "assign or create" logic. No weekly re-cluster. |
+| 6 | Incremental Clustering | Medium | **Not implemented.** Clustering rebuilds from scratch every run. No "assign or create" logic. No weekly re-cluster. |
 | 7 | API Rate Limit & Cost Tracking | Low | **Not implemented.** Still just a 5s sleep on 429. No `api_rate_limits` table. No cost tracking columns on `collection_runs`. |
 
 ### Minor Code Fixes Status
 
 | Fix | Status |
 |---|---|
-| Replace `Date.now() + random` feedback_id with `crypto.randomUUID()` | **Not done.** Still uses `DIR-${Date.now()}-...` pattern (line 198), `RED-...` (line 397), `TW-...` (line 609), `WEB-...` (line 921). |
-| Save `company_id` to local variable in try block | **Partially done.** `company_id` is destructured from `req.json()` at line 658, but the catch block (line 1124) still calls `req.clone().json()` which is fragile. |
-| Document HARD_WALL_MS consistently | **Partially done.** Comment says "70s hard wall (leave 50s for Reddit/Twitter/clustering/save)" but the actual Deno timeout and spec says 120s. |
-| Add type annotations to company object | **Not done.** Company is typed as `any` (line 19 of `collectDirectReviews`). |
+| Replace `Date.now() + random` feedback_id with `crypto.randomUUID()` | **✅ Done.** All phases now use `crypto.randomUUID()`. |
+| Save `company_id` to local variable in try block | **✅ Done.** `savedCompanyId` saved before async work; catch block uses it directly (no `req.clone()`). |
+| Document HARD_WALL_MS consistently | **✅ Done.** Comment now says "70s hard wall leaves ~50s margin before Deno 120s timeout". |
+| Add type annotations to company object | **✅ Done.** `CompanyRow` interface defined and used across all phase functions. |
 
 ### What IS Already Implemented (from prior work)
 
@@ -35,45 +35,11 @@
 - Increased batch concurrency (5)
 - Stuck run cleanup (3-minute timeout)
 - Error recovery in catch block
+- **Persisted review site URLs** (Phase 1A complete)
+- **Native Reddit JSON API** (Phase 1B complete)
+- **Minor code fixes** (all applied)
 
-## Implementation Plan
-
-Given the scope, I recommend implementing in the spec's suggested order. Here's the concrete plan:
-
-### Phase 1: Quick Wins (Persisted Review URLs + Native Reddit JSON API)
-
-**1A. Persisted Review URLs**
-
-DB migration:
-- Add 5 columns to `companies`: `g2_url text`, `capterra_url text`, `trustradius_url text`, `getapp_url text`, `review_urls_verified_at timestamptz`
-
-New edge function `supabase/functions/lookup-review-urls/index.ts`:
-- Takes `company_id`, loads company
-- For each platform, Firecrawl search: `"{company_name}" site:g2.com/products`, etc.
-- Extracts first matching URL from results
-- Updates `companies` row with canonical URLs
-- ~80 LOC
-
-Update `collect-feedback/index.ts` Phase 0 (lines 34-41):
-- Use `company.g2_url`, `company.capterra_url`, etc. when available
-- Fall back to slug construction only if stored URL is null
-
-Update `brand-profile/index.ts`:
-- After profiling, invoke `lookup-review-urls` if URLs not yet set
-
-UI: Add 4 optional URL fields to `CompanySetup.tsx`
-
-**1B. Native Reddit JSON API**
-
-DB migration:
-- Add `reddit_min_score integer default 5`, `reddit_max_age_days integer default 90` to `companies`
-
-Rewrite `collectRedditFeedback` (lines 232-434):
-- Replace Firecrawl calls with `fetch("https://www.reddit.com/search.json?q=...")`
-- For configured subreddits: `https://www.reddit.com/r/{sub}/search.json?q={brand}&restrict_sr=1&sort=top&limit=25`
-- Filter by `score >= reddit_min_score` and `created_utc` within `reddit_max_age_days`
-- Batch filtered posts into AI extraction (same batched pattern)
-- Eliminates Firecrawl usage for Reddit
+## Next Steps
 
 ### Phase 2: Two-Pass AI + Queue Architecture
 
@@ -117,15 +83,3 @@ Update `src/lib/api/collection.ts` to call orchestrator. Update UI to show per-j
 - Create `api_rate_limits` table per spec
 - Add cost tracking columns to `collection_runs`
 - Token bucket helper in each source function
-
-### Minor Fixes (apply during Phase 1)
-
-- Replace all `feedback_id` generation with `crypto.randomUUID()`
-- Save `company_id` to local var before any async work
-- Add type annotations to company objects
-- Fix `req.clone().json()` in catch block
-
-## Recommended Next Step
-
-Start with **Phase 1** (Persisted Review URLs + Native Reddit JSON API + minor fixes) as these are quick wins with the highest immediate data quality impact.
-

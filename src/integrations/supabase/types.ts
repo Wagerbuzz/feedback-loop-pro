@@ -189,55 +189,76 @@ export type Database = {
         Row: {
           auto_collect_enabled: boolean
           brand_terms: Json | null
+          capterra_url: string | null
           collection_frequency: string
           collection_sources: Json | null
           created_at: string
           domain: string
           feature_terms: Json | null
+          g2_url: string | null
+          getapp_url: string | null
           id: string
           industry_type: string | null
           last_collected_at: string | null
           name: string
           persona_type: string | null
           product_terms: Json | null
+          reddit_max_age_days: number | null
+          reddit_min_score: number | null
           reddit_subreddits: Json | null
+          review_urls_verified_at: string | null
           search_queries: Json | null
+          trustradius_url: string | null
           user_id: string
         }
         Insert: {
           auto_collect_enabled?: boolean
           brand_terms?: Json | null
+          capterra_url?: string | null
           collection_frequency?: string
           collection_sources?: Json | null
           created_at?: string
           domain: string
           feature_terms?: Json | null
+          g2_url?: string | null
+          getapp_url?: string | null
           id?: string
           industry_type?: string | null
           last_collected_at?: string | null
           name: string
           persona_type?: string | null
           product_terms?: Json | null
+          reddit_max_age_days?: number | null
+          reddit_min_score?: number | null
           reddit_subreddits?: Json | null
+          review_urls_verified_at?: string | null
           search_queries?: Json | null
+          trustradius_url?: string | null
           user_id: string
         }
         Update: {
           auto_collect_enabled?: boolean
           brand_terms?: Json | null
+          capterra_url?: string | null
           collection_frequency?: string
           collection_sources?: Json | null
           created_at?: string
           domain?: string
           feature_terms?: Json | null
+          g2_url?: string | null
+          getapp_url?: string | null
           id?: string
           industry_type?: string | null
           last_collected_at?: string | null
           name?: string
           persona_type?: string | null
           product_terms?: Json | null
+          reddit_max_age_days?: number | null
+          reddit_min_score?: number | null
           reddit_subreddits?: Json | null
+          review_urls_verified_at?: string | null
           search_queries?: Json | null
+          trustradius_url?: string | null
           user_id?: string
         }
         Relationships: []
