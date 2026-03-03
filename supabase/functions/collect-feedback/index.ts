@@ -75,118 +75,146 @@ async function collectDirectReviews(
     })
   );
 
-  // Process scraped content through AI extraction
+  // Collect all scraped pages with content for batched AI extraction
+  const scrapedPages: { url: string; source: string; content: string }[] = [];
   for (const result of scrapeResults) {
     if (result.status !== "fulfilled") continue;
     const { url, source, content, skipped } = result.value;
     if (skipped || content.length < 300) continue;
+    scrapedPages.push({ url, source, content: content.slice(0, 3000) });
+  }
 
-    try {
-      const extractRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${lovableApiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "google/gemini-2.5-flash",
-          messages: [
-            {
-              role: "system",
-              content: `You extract individual customer feedback items from ${source} review pages about ${company.name}. This is a direct review page for ${company.name}, so all reviews on this page should be about this product. Extract each individual review as a separate feedback item. Include the reviewer's name if available. Extract ONLY genuine user reviews - skip editorial content, marketing copy, and navigation text.`,
-            },
-            {
-              role: "user",
-              content: `Extract all individual reviews about ${company.name} from this ${source} page:\n\nURL: ${url}\n\n${content.slice(0, 8000)}`,
-            },
-          ],
-          tools: [
-            {
-              type: "function",
-              function: {
-                name: "extract_feedback",
-                description: "Extract structured feedback items from review page",
-                parameters: {
-                  type: "object",
-                  properties: {
+  if (scrapedPages.length === 0) {
+    console.log("Direct review scraping: no pages with content");
+    return { newCount, dupeCount, texts };
+  }
+
+  // Batch all pages into a single AI call
+  const combinedContent = scrapedPages
+    .map((p, i) => `--- REVIEW PAGE ${i + 1}: ${p.source} (${p.url}) ---\n${p.content}`)
+    .join("\n\n");
+  const cappedContent = combinedContent.slice(0, 15000);
+
+  console.log(`Direct review batched extraction: ${scrapedPages.length} pages, ${cappedContent.length} chars`);
+
+  try {
+    const extractRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${lovableApiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash-lite",
+        messages: [
+          {
+            role: "system",
+            content: `You extract individual customer feedback items from review pages about ${company.name}. Multiple review pages are provided, separated by "--- REVIEW PAGE N ---" delimiters. Extract each individual review as a separate feedback item. Include the reviewer's name if available. For each item, include the source_url of the page it came from. Extract ONLY genuine user reviews - skip editorial content, marketing copy, and navigation text.`,
+          },
+          {
+            role: "user",
+            content: `Extract all individual reviews about ${company.name} from these review pages:\n\n${cappedContent}`,
+          },
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "extract_feedback",
+              description: "Extract structured feedback items from review pages",
+              parameters: {
+                type: "object",
+                properties: {
+                  items: {
+                    type: "array",
                     items: {
-                      type: "array",
-                      items: {
-                        type: "object",
-                        properties: {
-                          author: { type: "string", description: "Reviewer name or anonymous" },
-                          text: { type: "string", description: "The review text (50-300 chars)" },
-                          sentiment: { type: "string", enum: ["Positive", "Negative", "Neutral"] },
-                          confidence: { type: "number", description: "Confidence 0-1" },
-                          pain_point_category: {
-                            type: "string",
-                            enum: ["UX", "Pricing", "Reliability", "Performance", "Documentation", "Features", "Support", "Security", "Integration", "Other"],
-                          },
-                          intent_type: {
-                            type: "string",
-                            enum: ["praise", "bug", "feature_request", "churn_risk", "comparison", "general"],
-                          },
-                          context_excerpt: { type: "string", description: "Surrounding context (100 chars)" },
+                      type: "object",
+                      properties: {
+                        author: { type: "string", description: "Reviewer name or anonymous" },
+                        text: { type: "string", description: "The review text (50-300 chars)" },
+                        sentiment: { type: "string", enum: ["Positive", "Negative", "Neutral"] },
+                        confidence: { type: "number", description: "Confidence 0-1" },
+                        source_url: { type: "string", description: "URL of the review page this item came from" },
+                        pain_point_category: {
+                          type: "string",
+                          enum: ["UX", "Pricing", "Reliability", "Performance", "Documentation", "Features", "Support", "Security", "Integration", "Other"],
                         },
-                        required: ["author", "text", "sentiment", "confidence", "pain_point_category", "intent_type"],
-                        additionalProperties: false,
+                        intent_type: {
+                          type: "string",
+                          enum: ["praise", "bug", "feature_request", "churn_risk", "comparison", "general"],
+                        },
+                        context_excerpt: { type: "string", description: "Surrounding context (100 chars)" },
                       },
+                      required: ["author", "text", "sentiment", "confidence", "source_url", "pain_point_category", "intent_type"],
+                      additionalProperties: false,
                     },
                   },
-                  required: ["items"],
-                  additionalProperties: false,
                 },
+                required: ["items"],
+                additionalProperties: false,
               },
             },
-          ],
-          tool_choice: { type: "function", function: { name: "extract_feedback" } },
-        }),
-      });
+          },
+        ],
+        tool_choice: { type: "function", function: { name: "extract_feedback" } },
+      }),
+    });
 
-      if (!extractRes.ok) {
-        if (extractRes.status === 429) await new Promise((r) => setTimeout(r, 5000));
-        continue;
-      }
-
-      const extractData = await extractRes.json();
-      const toolCall = extractData.choices?.[0]?.message?.tool_calls?.[0];
-      if (!toolCall) continue;
-
-      const { items } = JSON.parse(toolCall.function.arguments);
-      if (!items || !Array.isArray(items)) continue;
-
-      for (const item of items) {
-        if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.6) continue;
-
-        const contentHash = await hashText(item.text);
-
-        const feedbackRow = {
-          feedback_id: `DIR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          text: item.text.slice(0, 500),
-          customer_name: item.author || "Anonymous",
-          source,
-          sentiment: item.sentiment || "Neutral",
-          status: "New",
-          channel: source,
-          company_id: companyId,
-          source_url: url,
-          content_hash: contentHash,
-          pain_point_category: item.pain_point_category,
-          intent_type: item.intent_type,
-          confidence_score: item.confidence || 0.5,
-          original_context_excerpt: item.context_excerpt?.slice(0, 200) || null,
-        };
-
-        const { error: insertErr } = await supabaseClient.from("feedback").insert(feedbackRow);
-
-        if (insertErr) {
-          if (insertErr.message?.includes("idx_feedback_content_hash")) dupeCount++;
-          else console.warn("Direct review insert error:", insertErr.message);
-        } else {
-          newCount++;
-          texts.push(item.text);
-        }
-      }
-    } catch (aiErr) {
-      console.warn("Direct review AI extraction error:", aiErr);
+    if (!extractRes.ok) {
+      if (extractRes.status === 429) await new Promise((r) => setTimeout(r, 5000));
+      console.warn(`Direct review batched extraction failed: ${extractRes.status}`);
+      return { newCount, dupeCount, texts };
     }
+
+    const extractData = await extractRes.json();
+    const toolCall = extractData.choices?.[0]?.message?.tool_calls?.[0];
+    if (!toolCall) return { newCount, dupeCount, texts };
+
+    const { items } = JSON.parse(toolCall.function.arguments);
+    if (!items || !Array.isArray(items)) return { newCount, dupeCount, texts };
+
+    // Determine source from URL
+    const getSource = (url: string) => {
+      const u = (url || "").toLowerCase();
+      if (u.includes("g2.com")) return "G2";
+      if (u.includes("trustradius.com")) return "TrustRadius";
+      if (u.includes("capterra.com")) return "Capterra";
+      return "Web";
+    };
+
+    for (const item of items) {
+      if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.6) continue;
+
+      const contentHash = await hashText(item.text);
+      const itemUrl = item.source_url || scrapedPages[0]?.url || "";
+      const source = getSource(itemUrl);
+
+      const feedbackRow = {
+        feedback_id: `DIR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        text: item.text.slice(0, 500),
+        customer_name: item.author || "Anonymous",
+        source,
+        sentiment: item.sentiment || "Neutral",
+        status: "New",
+        channel: source,
+        company_id: companyId,
+        source_url: itemUrl,
+        content_hash: contentHash,
+        pain_point_category: item.pain_point_category,
+        intent_type: item.intent_type,
+        confidence_score: item.confidence || 0.5,
+        original_context_excerpt: item.context_excerpt?.slice(0, 200) || null,
+      };
+
+      const { error: insertErr } = await supabaseClient.from("feedback").insert(feedbackRow);
+
+      if (insertErr) {
+        if (insertErr.message?.includes("idx_feedback_content_hash")) dupeCount++;
+        else console.warn("Direct review insert error:", insertErr.message);
+      } else {
+        newCount++;
+        texts.push(item.text);
+      }
+    }
+  } catch (aiErr) {
+    console.warn("Direct review batched AI extraction error:", aiErr);
   }
 
   console.log(`Direct review scraping: ${newCount} new, ${dupeCount} dupes`);
@@ -422,7 +450,6 @@ async function collectTwitterFeedback(
   let bearerToken = BEARER_TOKEN;
 
   if (!bearerToken && CONSUMER_KEY && CONSUMER_SECRET) {
-    // Fall back to OAuth 2.0 client credentials flow
     try {
       const credentials = btoa(`${CONSUMER_KEY}:${CONSUMER_SECRET}`);
       const tokenRes = await fetch("https://api.x.com/oauth2/token", {
@@ -452,7 +479,6 @@ async function collectTwitterFeedback(
 
   const brandName = brandTerms[0] || company.name;
 
-  // Build disambiguated Twitter search query using product terms and industry
   const productTerms = (company.product_terms || []).slice(0, 3);
   const industryType = company.industry_type || "";
   const contextTerms = [
@@ -471,7 +497,6 @@ async function collectTwitterFeedback(
   console.log(`Twitter search query: ${query}`);
 
   try {
-    // Search recent tweets
     const searchUrl = `https://api.x.com/2/tweets/search/recent?query=${encodeURIComponent(query)}&max_results=100&tweet.fields=author_id,created_at,public_metrics,text`;
     const searchRes = await fetch(searchUrl, {
       headers: { Authorization: `Bearer ${bearerToken}` },
@@ -487,7 +512,6 @@ async function collectTwitterFeedback(
 
     console.log(`Twitter: found ${tweets.length} tweets`);
 
-    // Process tweets in batches through AI extraction
     const batchSize = 20;
     for (let i = 0; i < tweets.length; i += batchSize) {
       const batch = tweets.slice(i, i + batchSize);
@@ -562,7 +586,6 @@ async function collectTwitterFeedback(
       for (const item of items) {
         if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.8) continue;
 
-        // Post-extraction brand validation: check feedback mentions brand-relevant terms
         const feedbackLower = item.text.toLowerCase();
         const allValidationTerms = [...brandTerms, ...(company.product_terms || []), company.domain].filter(Boolean);
         const mentionsBrand = allValidationTerms.some((t: string) => feedbackLower.includes(t.toLowerCase()));
@@ -653,7 +676,7 @@ serve(async (req) => {
 
     // Time budget management
     const startTime = Date.now();
-    const TIME_BUDGET_MS = 55000; // 55s total (leave 5s margin)
+    const HARD_WALL_MS = 90000; // 90s hard wall (leave 30s margin before Deno 120s timeout)
     const hasMultipleSources = collectionSources.length > 1;
     const webQueryLimit = hasMultipleSources ? 20 : 25;
     const webBudgetMs = hasMultipleSources ? 40000 : 50000;
@@ -713,6 +736,9 @@ serve(async (req) => {
           const searchData = await searchRes.json();
           const results = searchData?.data || [];
 
+          // Collect relevant results for batched AI extraction
+          const relevantResults: { url: string; content: string; relevanceSignals: string[] }[] = [];
+
           for (const result of results) {
             const content = result.markdown || "";
             if (content.length < 300) continue;
@@ -736,7 +762,7 @@ serve(async (req) => {
               continue;
             }
 
-            // Soft relevance check: brand terms, product terms, domain, or URL match
+            // Soft relevance check
             const lowerContent = content.toLowerCase();
             const hasBrandMention = brandTerms.some((t: string) => lowerContent.includes(t.toLowerCase()));
             const productTerms = (company.product_terms as string[]) || [];
@@ -750,7 +776,6 @@ serve(async (req) => {
               continue;
             }
 
-            // Build relevance context for AI prompt
             const relevanceSignals: string[] = [];
             if (hasBrandMention) relevanceSignals.push("brand name in content");
             if (hasProductMention) relevanceSignals.push("product term in content");
@@ -761,80 +786,108 @@ serve(async (req) => {
             const affiliateKeywords = ["affiliate", "sponsored post", "paid partnership", "commission"];
             if (affiliateKeywords.some((k) => lowerContent.includes(k))) continue;
 
-            // Extract feedback via AI
-            try {
-              const extractRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-                method: "POST",
-                headers: { Authorization: `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  model: "google/gemini-2.5-flash",
-                  messages: [
-                    {
-                      role: "system",
-                      content: `You extract individual customer feedback items from web content about ${company.name}. This page was found via a web search for feedback about ${company.name}. Even if it's a blog post, newsletter, or community discussion that discusses the product indirectly, extract any user opinions or experiences mentioned. Relevance signals found: ${relevanceSignals.join(", ")}. Extract ONLY genuine user opinions, complaints, praise, or feature requests that are DIRECTLY about ${company.name} or its products (${brandTerms.join(', ')}). Do NOT extract reviews about other products even if they appear on the same page. Skip marketing copy, author bios, and navigation text. Every extracted item MUST be directly about ${company.name}. If the page is primarily reviewing a different product, return an empty items array.`,
-                    },
-                    {
-                      role: "user",
-                      content: `Extract feedback items ONLY about ${company.name} from this page. Ignore any reviews or opinions about other products:\n\nURL: ${url}\n\nContent:\n${content.slice(0, 6000)}`,
-                    },
-                  ],
-                  tools: [
-                    {
-                      type: "function",
-                      function: {
-                        name: "extract_feedback",
-                        description: "Extract structured feedback items from web content",
-                        parameters: {
-                          type: "object",
-                          properties: {
+            relevantResults.push({ url, content: content.slice(0, 2000), relevanceSignals });
+          }
+
+          if (relevantResults.length === 0) {
+            return { queryNew, queryDupes, queryTexts };
+          }
+
+          // Batched AI extraction: combine all relevant results into one AI call
+          const combinedContent = relevantResults
+            .map((r, i) => `--- SOURCE ${i + 1}: ${r.url} (relevance: ${r.relevanceSignals.join(", ")}) ---\n${r.content}`)
+            .join("\n\n");
+          const cappedContent = combinedContent.slice(0, 12000);
+
+          console.log(`Batched extraction for "${q.query_text}": ${relevantResults.length} results, ${cappedContent.length} chars`);
+
+          try {
+            const extractRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+              method: "POST",
+              headers: { Authorization: `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
+              body: JSON.stringify({
+                model: "google/gemini-2.5-flash-lite",
+                messages: [
+                  {
+                    role: "system",
+                    content: `You extract individual customer feedback items from web content about ${company.name}. Multiple pages are provided, separated by "--- SOURCE N ---" delimiters. Extract ONLY genuine user opinions, complaints, praise, or feature requests that are DIRECTLY about ${company.name} or its products (${brandTerms.join(', ')}). For each item, include the source_url of the page it came from. Do NOT extract reviews about other products. Skip marketing copy, author bios, and navigation text. If a page is primarily reviewing a different product, skip it entirely.`,
+                  },
+                  {
+                    role: "user",
+                    content: `Extract feedback items ONLY about ${company.name} from these pages:\n\n${cappedContent}`,
+                  },
+                ],
+                tools: [
+                  {
+                    type: "function",
+                    function: {
+                      name: "extract_feedback",
+                      description: "Extract structured feedback items from web content",
+                      parameters: {
+                        type: "object",
+                        properties: {
+                          items: {
+                            type: "array",
                             items: {
-                              type: "array",
-                              items: {
-                                type: "object",
-                                properties: {
-                                  author: { type: "string", description: "Author name or anonymous" },
-                                  text: { type: "string", description: "The feedback text (50-300 chars)" },
-                                  sentiment: { type: "string", enum: ["Positive", "Negative", "Neutral"] },
-                                  confidence: { type: "number", description: "Confidence 0-1 that this feedback is genuinely about " + company.name },
-                                  pain_point_category: {
-                                    type: "string",
-                                    enum: ["UX", "Pricing", "Reliability", "Performance", "Documentation", "Features", "Support", "Security", "Integration", "Other"],
-                                  },
-                                  intent_type: {
-                                    type: "string",
-                                    enum: ["praise", "bug", "feature_request", "churn_risk", "comparison", "general"],
-                                  },
-                                  context_excerpt: { type: "string", description: "Surrounding context (100 chars)" },
+                              type: "object",
+                              properties: {
+                                author: { type: "string", description: "Author name or anonymous" },
+                                text: { type: "string", description: "The feedback text (50-300 chars)" },
+                                sentiment: { type: "string", enum: ["Positive", "Negative", "Neutral"] },
+                                confidence: { type: "number", description: "Confidence 0-1 that this feedback is genuinely about " + company.name },
+                                source_url: { type: "string", description: "URL of the page this item came from" },
+                                pain_point_category: {
+                                  type: "string",
+                                  enum: ["UX", "Pricing", "Reliability", "Performance", "Documentation", "Features", "Support", "Security", "Integration", "Other"],
                                 },
-                                required: ["author", "text", "sentiment", "confidence", "pain_point_category", "intent_type"],
-                                additionalProperties: false,
+                                intent_type: {
+                                  type: "string",
+                                  enum: ["praise", "bug", "feature_request", "churn_risk", "comparison", "general"],
+                                },
+                                context_excerpt: { type: "string", description: "Surrounding context (100 chars)" },
                               },
+                              required: ["author", "text", "sentiment", "confidence", "source_url", "pain_point_category", "intent_type"],
+                              additionalProperties: false,
                             },
                           },
-                          required: ["items"],
-                          additionalProperties: false,
                         },
+                        required: ["items"],
+                        additionalProperties: false,
                       },
                     },
-                  ],
-                  tool_choice: { type: "function", function: { name: "extract_feedback" } },
-                }),
-              });
+                  },
+                ],
+                tool_choice: { type: "function", function: { name: "extract_feedback" } },
+              }),
+            });
 
-              if (!extractRes.ok) {
-                if (extractRes.status === 429) {
-                  console.warn("Rate limited, waiting 5s...");
-                  await new Promise((r) => setTimeout(r, 5000));
-                }
-                return { queryNew, queryDupes, queryTexts };
+            if (!extractRes.ok) {
+              if (extractRes.status === 429) {
+                console.warn("Rate limited, waiting 5s...");
+                await new Promise((r) => setTimeout(r, 5000));
+              }
+              return { queryNew, queryDupes, queryTexts };
+            }
+
+            const extractData = await extractRes.json();
+            const toolCall = extractData.choices?.[0]?.message?.tool_calls?.[0];
+            if (!toolCall) return { queryNew, queryDupes, queryTexts };
+
+            const { items } = JSON.parse(toolCall.function.arguments);
+            if (!items || !Array.isArray(items)) return { queryNew, queryDupes, queryTexts };
+
+            for (const item of items) {
+              if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.7) continue;
+
+              const feedbackLower = item.text.toLowerCase();
+              const mentionsBrand = brandTerms.some((t: string) => feedbackLower.includes(t.toLowerCase()));
+              if (!mentionsBrand && (item.confidence || 0) < 0.8) {
+                console.log(`Skipping feedback not mentioning brand: "${item.text.slice(0, 60)}..."`);
+                continue;
               }
 
-              const extractData = await extractRes.json();
-              const toolCall = extractData.choices?.[0]?.message?.tool_calls?.[0];
-              if (!toolCall) return { queryNew, queryDupes, queryTexts };
-
-              const { items } = JSON.parse(toolCall.function.arguments);
-              if (!items || !Array.isArray(items)) return { queryNew, queryDupes, queryTexts };
+              const itemUrl = item.source_url || relevantResults[0]?.url || "";
+              const urlLower = itemUrl.toLowerCase();
 
               // Determine source from URL
               let source = "Web";
@@ -845,50 +898,40 @@ serve(async (req) => {
               else if (urlLower.includes("producthunt.com")) source = "ProductHunt";
               else if (urlLower.includes("news.ycombinator.com")) source = "HackerNews";
 
-              for (const item of items) {
-                if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.7) continue;
+              const contentHash = await hashText(item.text);
 
-                const feedbackLower = item.text.toLowerCase();
-                const mentionsBrand = brandTerms.some((t: string) => feedbackLower.includes(t.toLowerCase()));
-                if (!mentionsBrand && (item.confidence || 0) < 0.8) {
-                  console.log(`Skipping feedback not mentioning brand: "${item.text.slice(0, 60)}..."`);
-                  continue;
-                }
-                const contentHash = await hashText(item.text);
+              const feedbackRow = {
+                feedback_id: `WEB-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                text: item.text.slice(0, 500),
+                customer_name: item.author || "Anonymous",
+                source,
+                sentiment: item.sentiment || "Neutral",
+                status: "New",
+                channel: source,
+                company_id,
+                source_url: itemUrl,
+                content_hash: contentHash,
+                pain_point_category: item.pain_point_category,
+                intent_type: item.intent_type,
+                confidence_score: item.confidence || 0.5,
+                original_context_excerpt: item.context_excerpt?.slice(0, 200) || null,
+              };
 
-                const feedbackRow = {
-                  feedback_id: `WEB-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                  text: item.text.slice(0, 500),
-                  customer_name: item.author || "Anonymous",
-                  source,
-                  sentiment: item.sentiment || "Neutral",
-                  status: "New",
-                  channel: source,
-                  company_id,
-                  source_url: url,
-                  content_hash: contentHash,
-                  pain_point_category: item.pain_point_category,
-                  intent_type: item.intent_type,
-                  confidence_score: item.confidence || 0.5,
-                  original_context_excerpt: item.context_excerpt?.slice(0, 200) || null,
-                };
+              const { error: insertErr } = await supabase.from("feedback").insert(feedbackRow);
 
-                const { error: insertErr } = await supabase.from("feedback").insert(feedbackRow);
-
-                if (insertErr) {
-                  if (insertErr.message?.includes("idx_feedback_content_hash")) {
-                    queryDupes++;
-                  } else {
-                    console.warn("Insert error:", insertErr.message);
-                  }
+              if (insertErr) {
+                if (insertErr.message?.includes("idx_feedback_content_hash")) {
+                  queryDupes++;
                 } else {
-                  queryNew++;
-                  queryTexts.push(item.text);
+                  console.warn("Insert error:", insertErr.message);
                 }
+              } else {
+                queryNew++;
+                queryTexts.push(item.text);
               }
-            } catch (aiErr) {
-              console.warn("AI extraction error:", aiErr);
             }
+          } catch (aiErr) {
+            console.warn("AI extraction error:", aiErr);
           }
         } catch (searchErr) {
           console.warn(`Query error for "${q.query_text}":`, searchErr);
@@ -897,9 +940,9 @@ serve(async (req) => {
         return { queryNew, queryDupes, queryTexts };
       };
 
-      // Process queries in parallel batches of 3
+      // Process queries in parallel batches of 5
       const queriesToProcess = queries.slice(0, webQueryLimit);
-      const batchSize = 3;
+      const batchSize = 5;
       for (let i = 0; i < queriesToProcess.length; i += batchSize) {
         const elapsed = Date.now() - webPhaseStart;
         if (elapsed > webBudgetMs) {
@@ -921,29 +964,29 @@ serve(async (req) => {
       }
     }
 
-    // ===== Phase 2: Reddit Collection =====
+    // ===== Phase 2: Reddit Collection (always attempt unless past 90s wall) =====
     console.log(`Starting Reddit collection phase... (elapsed: ${Date.now() - startTime}ms)`);
-    if (Date.now() - startTime < TIME_BUDGET_MS) {
+    if (Date.now() - startTime < HARD_WALL_MS) {
       const redditResult = await collectRedditFeedback(company, brandTerms, supabase, company_id, LOVABLE_API_KEY, FIRECRAWL_API_KEY);
       totalNew += redditResult.newCount;
       totalDuplicates += redditResult.dupeCount;
       allFeedbackTexts.push(...redditResult.texts);
     } else {
-      console.log("Skipping Reddit phase - time budget exhausted");
+      console.log("Skipping Reddit phase - past 90s hard wall");
     }
 
-    // ===== Phase 3: Twitter/X Collection =====
+    // ===== Phase 3: Twitter/X Collection (always attempt unless past 90s wall) =====
     console.log(`Starting Twitter collection phase... (elapsed: ${Date.now() - startTime}ms)`);
     const hasBearerToken = !!Deno.env.get("TWITTER_BEARER_TOKEN");
     const hasConsumerKeys = !!Deno.env.get("TWITTER_CONSUMER_KEY") && !!Deno.env.get("TWITTER_CONSUMER_SECRET");
     console.log(`Twitter auth: bearer=${hasBearerToken}, consumer_keys=${hasConsumerKeys}`);
-    if (Date.now() - startTime < TIME_BUDGET_MS) {
+    if (Date.now() - startTime < HARD_WALL_MS) {
       const twitterResult = await collectTwitterFeedback(company, brandTerms, supabase, company_id, LOVABLE_API_KEY);
       totalNew += twitterResult.newCount;
       totalDuplicates += twitterResult.dupeCount;
       allFeedbackTexts.push(...twitterResult.texts);
     } else {
-      console.log("Skipping Twitter phase - time budget exhausted");
+      console.log("Skipping Twitter phase - past 90s hard wall");
     }
 
     // ===== Clustering phase =====
