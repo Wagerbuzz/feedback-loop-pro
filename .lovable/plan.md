@@ -1,107 +1,89 @@
 
+# Fix Feedback Discovery Throughput
 
-# Make Discovery Engine Comprehensive for Any Brand
+## Root Cause
 
-## Problems Found
+The logs show that for Apollo, only **1 batch of 3 queries** ran before hitting the 40s web phase budget. Reddit and Twitter were completely skipped (76s total elapsed). The result: only 20 feedback items from 30 total (Capterra + TrustRadius + 1 web batch).
 
-1. **Phase 0 has no time cap** -- direct review scraping runs uncapped and can consume the entire 55s budget, causing web search (Phase 1) to get zero time. The budget check at line 894 uses `startTime` which includes Phase 0 duration.
-
-2. **No query disambiguation** -- queries like "Clay review blog" return pottery results. The brand name is used raw without any industry/product context to help search engines understand which "Clay" we mean.
-
-3. **Too many results per query** -- `limit: 15` on line 692 means each Firecrawl search returns 15 results, but most are irrelevant tail results. This wastes time on AI extraction for low-quality pages when we could process more distinct queries instead.
-
-4. **Weak product_terms extraction** -- the brand-profile prompt says "Specific product names" but doesn't guide the AI to extract sub-features, modules, or named capabilities (e.g., "Claygent", "Waterfall Enrichment"). Empty product_terms means fewer relevance signals.
-
-5. **No domain-based queries** -- the domain (e.g., `clay.com`) is unambiguous but never used in search queries. A query like `"clay.com review"` would bypass common-name problems entirely.
+The bottleneck is **per-result AI extraction**. Each of the 5 search results per query triggers a separate AI call (2-4s each). So 3 queries x 5 results = 15 sequential-ish AI calls = ~40s consumed by a single batch.
 
 ## Changes
 
-### 1. Cap Phase 0 at 15 seconds (`collect-feedback/index.ts`)
+### 1. Batch AI extraction: combine multiple search results into one AI call
 
-Wrap `collectDirectReviews` in a `Promise.race` with a 15s timeout so it can never starve later phases. Reset the web phase timer after Phase 0 completes so Phase 1 always gets its full budget.
+Instead of calling AI separately for each search result, combine all results from a single query (up to 5) into one AI prompt. This turns 5 AI calls into 1 per query, cutting AI time by ~80%.
 
-```text
-Phase 0: max 15s (timeout race)
-Phase 1: fresh timer, full 40s budget starting AFTER Phase 0
-```
+**File: `supabase/functions/collect-feedback/index.ts`**
 
-### 2. Add disambiguation to queries (`brand-profile/index.ts`)
-
-Build a `disambiguator` from `industry_type` (e.g., "CRM", "GTM", "SEO tool") and append it to all discovery query templates:
+In `processQuery`, after fetching search results and filtering for relevance, concatenate the relevant pages into a single AI prompt:
 
 ```text
-Before: "{brand} review blog"
-After:  "{brand} CRM review blog"
+Before (per result):
+  Result 1 -> AI call -> feedback items
+  Result 2 -> AI call -> feedback items  
+  Result 3 -> AI call -> feedback items
+  (3 AI calls x 3s = 9s per query)
+
+After (batched):
+  [Result 1 + Result 2 + Result 3] -> single AI call -> all feedback items
+  (1 AI call x 4s = 4s per query)
 ```
 
-For targeted queries with `site:` constraints, disambiguation is optional since the site already narrows results.
+- Collect all relevant results (after URL dedup + relevance filter), truncate each to ~2000 chars
+- Send them as a single prompt with clear `--- SOURCE N: {url} ---` delimiters
+- AI extracts from all sources at once, with a `source_url` field per item
+- Cap combined content at 12,000 chars to stay within model limits
 
-### 3. Add domain-based query bucket (`brand-profile/index.ts`)
+### 2. Batch AI extraction for Phase 0 (direct reviews) too
 
-New discovery bucket that uses the domain instead of the brand name:
+Same problem exists in `collectDirectReviews` -- each of the 5 review URLs gets a separate AI call. Batch them the same way.
 
+### 3. Increase batch concurrency from 3 to 5
+
+With batched AI extraction, each query now takes ~4s instead of ~15s. We can safely increase from 3 concurrent queries to 5, processing all 25 queries in 5 batches.
+
+### 4. Ensure Reddit/Twitter phases always run
+
+Currently the overall `TIME_BUDGET_MS` (55s) check on line 926 uses `startTime` which includes Phase 0 + Phase 1. With the speed improvements above, phases should complete in time, but as a safety net, give Reddit and Twitter their own minimum time allocation rather than skipping them entirely when the web phase runs long.
+
+Change the Reddit/Twitter phase guards from:
 ```text
-domain_search: ["{domain} review", "{domain} feedback", "{domain} alternative"]
+if (Date.now() - startTime < TIME_BUDGET_MS)  // Skips if web ran long
 ```
+To a softer approach: always attempt Reddit/Twitter unless we're past a hard 90s wall clock (the Deno function timeout is ~120s).
 
-These queries are completely unambiguous regardless of brand name commonality.
+### 5. Use gemini-2.5-flash-lite for web extraction
 
-### 4. Reduce search limit from 15 to 5 (`collect-feedback/index.ts`)
-
-Change `limit: 15` to `limit: 5` on the Firecrawl search call. This processes more distinct queries within the time budget since fewer results per query means faster AI extraction cycles.
-
-### 5. Improve product_terms extraction (`brand-profile/index.ts`)
-
-Update the `product_terms` schema description to explicitly ask for sub-products, modules, and named features:
-
-```text
-Before: "Specific product names (e.g. 'Atlas', 'Compass', 'Realm')"
-After:  "Specific product names, sub-products, modules, and named features 
-         (e.g. 'Atlas', 'Compass', 'Claygent', 'Waterfall Enrichment', 'Chrome Extension')"
-```
-
-Also add a line to the user prompt: "Look for named features, modules, and sub-products even if they aren't separate products."
+The web extraction AI calls use `gemini-2.5-flash` which is overkill for structured extraction from pre-filtered content. Switch to `gemini-2.5-flash-lite` which is faster and cheaper, reserving `gemini-2.5-flash` only for the clustering phase where reasoning quality matters more.
 
 ## Technical Details
 
 ### File: `supabase/functions/collect-feedback/index.ts`
 
-**Phase 0 timeout** (lines 666-674):
-- Wrap `collectDirectReviews(...)` in `Promise.race` with a 15s timeout
-- After Phase 0, create a new `webPhaseStart = Date.now()` and use it for Phase 1 budget checks instead of `startTime`
+**Phase 0 batched extraction** (lines 78-180):
+- After all 5 review URLs are scraped in parallel, combine their content into one AI prompt instead of looping through each separately
+- Format: `--- REVIEW PAGE: {source} ({url}) ---\n{content}\n` for each page
+- Single AI call extracts all items with an added `source_url` field in the schema
+- Truncate each page to 3000 chars, total cap 15000 chars
 
-**Search limit** (line 692):
-- Change `limit: 15` to `limit: 5`
+**Phase 1 `processQuery` batched extraction** (lines 691-898):
+- After the search results loop that filters for relevance/dedup, collect all passing results into an array
+- Combine into a single AI prompt with delimiters
+- Single AI call with `source_url` field per extracted item
+- Truncate each result to 2000 chars, total cap 12000 chars
 
-**Web phase budget** (line 894):
-- Replace `Date.now() - startTime` with `Date.now() - webPhaseStart` so Phase 1 gets its own independent budget window
+**Increase batch size** (line 902):
+- Change `const batchSize = 3` to `const batchSize = 5`
 
-### File: `supabase/functions/brand-profile/index.ts`
+**Model change** (lines 89, 770):
+- Change `google/gemini-2.5-flash` to `google/gemini-2.5-flash-lite` for both Phase 0 and Phase 1 extraction
 
-**Product terms schema** (line 73):
-- Update description to include sub-products, modules, named features with examples
-
-**Query disambiguation** (lines 140-174):
-- After extracting profile, build `disambiguator` from `industry_type` (take first 2 words)
-- Append disambiguator to discovery bucket templates
-- Add new `domain_search` bucket with domain-based templates
-- Keep targeted bucket templates unchanged (site constraints handle disambiguation)
-
-**AI prompt** (line 53):
-- Add instruction: "Look for named features, modules, and sub-products even if they aren't standalone products."
-
-## Files Changed
-
-| File | Change |
-|---|---|
-| `supabase/functions/collect-feedback/index.ts` | 15s Phase 0 timeout, independent web phase timer, reduce search limit to 5 |
-| `supabase/functions/brand-profile/index.ts` | Add disambiguation to discovery queries, add domain-based query bucket, improve product_terms extraction prompt |
+**Phase 2/3 guards** (lines 926, 940):
+- Change from `Date.now() - startTime < TIME_BUDGET_MS` to `Date.now() - startTime < 90000` (90s hard wall, leaving 30s margin before Deno timeout)
 
 ## Expected Outcome
 
-- Phase 1 (web search) always gets its full 40s budget regardless of Phase 0 duration
-- Queries like "Clay CRM review blog" and "clay.com feedback" return relevant results instead of pottery
-- 3x more distinct queries processed per run (5 results each vs 15)
-- Richer product_terms give the soft relevance filter more signals to match
-- Works equally well for unique names (AirOps) and common names (Clay, Notion, Linear)
-
+- **5x fewer AI calls** per run (batched extraction): 25 queries = 25 AI calls instead of ~125
+- **3x more queries processed**: all 25 queries complete in ~20s instead of only 3
+- **Reddit and Twitter always run**: softer time guard ensures later phases execute
+- **For Apollo specifically**: should go from 20 items to 80-150+ items across G2, Capterra, TrustRadius, blogs, Reddit, and Twitter
