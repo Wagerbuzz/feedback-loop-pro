@@ -1,89 +1,131 @@
 
-# Fix Feedback Discovery Throughput
 
-## Root Cause
+# Spec Gap Analysis: Feedback Collection Engine
 
-The logs show that for Apollo, only **1 batch of 3 queries** ran before hitting the 40s web phase budget. Reddit and Twitter were completely skipped (76s total elapsed). The result: only 20 feedback items from 30 total (Capterra + TrustRadius + 1 web batch).
+## Current State vs. Specification
 
-The bottleneck is **per-result AI extraction**. Each of the 5 search results per query triggers a separate AI call (2-4s each). So 3 queries x 5 results = 15 sequential-ish AI calls = ~40s consumed by a single batch.
+| # | Improvement | Spec Status | Current State |
+|---|---|---|---|
+| 1 | Queue-Based Architecture | Critical | **Not implemented.** Still a monolithic single function. No `collection_jobs` table. No orchestrator. No per-source retry. |
+| 2 | Persisted Review URLs | High | **Not implemented.** Phase 0 still constructs URLs via slug (lines 35-41). No `g2_url`, `capterra_url`, `trustradius_url`, `getapp_url` columns on `companies`. No `lookup-review-urls` function. No UI fields. |
+| 3 | Native Reddit JSON API | High | **Not implemented.** Reddit still uses Firecrawl search (lines 290-298). No upvote/score filtering. No `reddit_min_score` or `reddit_max_age_days` columns on `companies`. |
+| 4 | Semantic Deduplication | High | **Not implemented.** Still SHA-256 exact-match only (line 10-15). No `pgvector` extension. No `embedding` column on `feedback`. |
+| 5 | Two-Pass AI (Extract then Classify) | Medium | **Not implemented.** Still single-pass extraction+classification in one prompt (all phases). |
+| 6 | Incremental Clustering | Medium | **Not implemented.** Clustering rebuilds from scratch every run (lines 1009-1066). No "assign or create" logic. No weekly re-cluster. |
+| 7 | API Rate Limit & Cost Tracking | Low | **Not implemented.** Still just a 5s sleep on 429. No `api_rate_limits` table. No cost tracking columns on `collection_runs`. |
 
-## Changes
+### Minor Code Fixes Status
 
-### 1. Batch AI extraction: combine multiple search results into one AI call
+| Fix | Status |
+|---|---|
+| Replace `Date.now() + random` feedback_id with `crypto.randomUUID()` | **Not done.** Still uses `DIR-${Date.now()}-...` pattern (line 198), `RED-...` (line 397), `TW-...` (line 609), `WEB-...` (line 921). |
+| Save `company_id` to local variable in try block | **Partially done.** `company_id` is destructured from `req.json()` at line 658, but the catch block (line 1124) still calls `req.clone().json()` which is fragile. |
+| Document HARD_WALL_MS consistently | **Partially done.** Comment says "70s hard wall (leave 50s for Reddit/Twitter/clustering/save)" but the actual Deno timeout and spec says 120s. |
+| Add type annotations to company object | **Not done.** Company is typed as `any` (line 19 of `collectDirectReviews`). |
 
-Instead of calling AI separately for each search result, combine all results from a single query (up to 5) into one AI prompt. This turns 5 AI calls into 1 per query, cutting AI time by ~80%.
+### What IS Already Implemented (from prior work)
 
-**File: `supabase/functions/collect-feedback/index.ts`**
+- Batched AI extraction (combining multiple results into one prompt)
+- Phase 0 timeout cap (15s)
+- Independent web phase timer (`webPhaseStart`)
+- Query disambiguation from `industry_type`
+- Domain-based query bucket
+- Reduced search limit (5 results)
+- Model optimization (Flash Lite for extraction, Flash for clustering)
+- Increased batch concurrency (5)
+- Stuck run cleanup (3-minute timeout)
+- Error recovery in catch block
 
-In `processQuery`, after fetching search results and filtering for relevance, concatenate the relevant pages into a single AI prompt:
+## Implementation Plan
 
-```text
-Before (per result):
-  Result 1 -> AI call -> feedback items
-  Result 2 -> AI call -> feedback items  
-  Result 3 -> AI call -> feedback items
-  (3 AI calls x 3s = 9s per query)
+Given the scope, I recommend implementing in the spec's suggested order. Here's the concrete plan:
 
-After (batched):
-  [Result 1 + Result 2 + Result 3] -> single AI call -> all feedback items
-  (1 AI call x 4s = 4s per query)
-```
+### Phase 1: Quick Wins (Persisted Review URLs + Native Reddit JSON API)
 
-- Collect all relevant results (after URL dedup + relevance filter), truncate each to ~2000 chars
-- Send them as a single prompt with clear `--- SOURCE N: {url} ---` delimiters
-- AI extracts from all sources at once, with a `source_url` field per item
-- Cap combined content at 12,000 chars to stay within model limits
+**1A. Persisted Review URLs**
 
-### 2. Batch AI extraction for Phase 0 (direct reviews) too
+DB migration:
+- Add 5 columns to `companies`: `g2_url text`, `capterra_url text`, `trustradius_url text`, `getapp_url text`, `review_urls_verified_at timestamptz`
 
-Same problem exists in `collectDirectReviews` -- each of the 5 review URLs gets a separate AI call. Batch them the same way.
+New edge function `supabase/functions/lookup-review-urls/index.ts`:
+- Takes `company_id`, loads company
+- For each platform, Firecrawl search: `"{company_name}" site:g2.com/products`, etc.
+- Extracts first matching URL from results
+- Updates `companies` row with canonical URLs
+- ~80 LOC
 
-### 3. Increase batch concurrency from 3 to 5
+Update `collect-feedback/index.ts` Phase 0 (lines 34-41):
+- Use `company.g2_url`, `company.capterra_url`, etc. when available
+- Fall back to slug construction only if stored URL is null
 
-With batched AI extraction, each query now takes ~4s instead of ~15s. We can safely increase from 3 concurrent queries to 5, processing all 25 queries in 5 batches.
+Update `brand-profile/index.ts`:
+- After profiling, invoke `lookup-review-urls` if URLs not yet set
 
-### 4. Ensure Reddit/Twitter phases always run
+UI: Add 4 optional URL fields to `CompanySetup.tsx`
 
-Currently the overall `TIME_BUDGET_MS` (55s) check on line 926 uses `startTime` which includes Phase 0 + Phase 1. With the speed improvements above, phases should complete in time, but as a safety net, give Reddit and Twitter their own minimum time allocation rather than skipping them entirely when the web phase runs long.
+**1B. Native Reddit JSON API**
 
-Change the Reddit/Twitter phase guards from:
-```text
-if (Date.now() - startTime < TIME_BUDGET_MS)  // Skips if web ran long
-```
-To a softer approach: always attempt Reddit/Twitter unless we're past a hard 90s wall clock (the Deno function timeout is ~120s).
+DB migration:
+- Add `reddit_min_score integer default 5`, `reddit_max_age_days integer default 90` to `companies`
 
-### 5. Use gemini-2.5-flash-lite for web extraction
+Rewrite `collectRedditFeedback` (lines 232-434):
+- Replace Firecrawl calls with `fetch("https://www.reddit.com/search.json?q=...")`
+- For configured subreddits: `https://www.reddit.com/r/{sub}/search.json?q={brand}&restrict_sr=1&sort=top&limit=25`
+- Filter by `score >= reddit_min_score` and `created_utc` within `reddit_max_age_days`
+- Batch filtered posts into AI extraction (same batched pattern)
+- Eliminates Firecrawl usage for Reddit
 
-The web extraction AI calls use `gemini-2.5-flash` which is overkill for structured extraction from pre-filtered content. Switch to `gemini-2.5-flash-lite` which is faster and cheaper, reserving `gemini-2.5-flash` only for the clustering phase where reasoning quality matters more.
+### Phase 2: Two-Pass AI + Queue Architecture
 
-## Technical Details
+**2A. Two-Pass AI**
 
-### File: `supabase/functions/collect-feedback/index.ts`
+Refactor all extraction prompts in `collect-feedback/index.ts`:
+- Pass 1 (Flash Lite): extract `{ author, text, source_url }` only, strict "find verbatim review text" prompt
+- Post-filter: drop < 30 chars, drop items with no brand/product term match
+- Pass 2 (Flash): classify batch of up to 25 items with `{ sentiment, pain_point_category, intent_type, confidence, context_excerpt }`, include company context
 
-**Phase 0 batched extraction** (lines 78-180):
-- After all 5 review URLs are scraped in parallel, combine their content into one AI prompt instead of looping through each separately
-- Format: `--- REVIEW PAGE: {source} ({url}) ---\n{content}\n` for each page
-- Single AI call extracts all items with an added `source_url` field in the schema
-- Truncate each page to 3000 chars, total cap 15000 chars
+**2B. Queue Architecture**
 
-**Phase 1 `processQuery` batched extraction** (lines 691-898):
-- After the search results loop that filters for relevance/dedup, collect all passing results into an array
-- Combine into a single AI prompt with delimiters
-- Single AI call with `source_url` field per extracted item
-- Truncate each result to 2000 chars, total cap 12000 chars
+DB migration: Create `collection_jobs` table per spec schema
 
-**Increase batch size** (line 902):
-- Change `const batchSize = 3` to `const batchSize = 5`
+New edge functions:
+- `collect-orchestrator/index.ts` — receives `company_id`, creates run, enqueues jobs, invokes source functions
+- `collect-reviews/index.ts` — Phase 0 logic standalone
+- `collect-web/index.ts` — Phase 1 logic standalone
+- `collect-reddit/index.ts` — Phase 2 standalone
+- `collect-twitter/index.ts` — Phase 3 standalone
+- `collect-cluster/index.ts` — clustering standalone
 
-**Model change** (lines 89, 770):
-- Change `google/gemini-2.5-flash` to `google/gemini-2.5-flash-lite` for both Phase 0 and Phase 1 extraction
+Keep `collect-feedback` as backward-compatible wrapper calling orchestrator.
 
-**Phase 2/3 guards** (lines 926, 940):
-- Change from `Date.now() - startTime < TIME_BUDGET_MS` to `Date.now() - startTime < 90000` (90s hard wall, leaving 30s margin before Deno timeout)
+Update `src/lib/api/collection.ts` to call orchestrator. Update UI to show per-job status.
 
-## Expected Outcome
+### Phase 3: Semantic Dedup + Incremental Clustering
 
-- **5x fewer AI calls** per run (batched extraction): 25 queries = 25 AI calls instead of ~125
-- **3x more queries processed**: all 25 queries complete in ~20s instead of only 3
-- **Reddit and Twitter always run**: softer time guard ensures later phases execute
-- **For Apollo specifically**: should go from 20 items to 80-150+ items across G2, Capterra, TrustRadius, blogs, Reddit, and Twitter
+**3A. Semantic Dedup**
+- Enable pgvector: `CREATE EXTENSION IF NOT EXISTS vector;`
+- Add `embedding vector(1536)` column + IVFFlat index to `feedback`
+- Compute embeddings via Lovable AI gateway before insert
+- Check cosine similarity > 0.92 within same `company_id`
+
+**3B. Incremental Clustering**
+- Refactor `collect-cluster` to fetch existing clusters, assign new items to existing or create new
+- Weekly full re-cluster via `pg_cron`
+
+### Phase 4: Rate Limit & Cost Tracking
+
+- Create `api_rate_limits` table per spec
+- Add cost tracking columns to `collection_runs`
+- Token bucket helper in each source function
+
+### Minor Fixes (apply during Phase 1)
+
+- Replace all `feedback_id` generation with `crypto.randomUUID()`
+- Save `company_id` to local var before any async work
+- Add type annotations to company objects
+- Fix `req.clone().json()` in catch block
+
+## Recommended Next Step
+
+Start with **Phase 1** (Persisted Review URLs + Native Reddit JSON API + minor fixes) as these are quick wins with the highest immediate data quality impact.
+
