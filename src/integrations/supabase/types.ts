@@ -141,6 +141,63 @@ export type Database = {
           },
         ]
       }
+      collection_jobs: {
+        Row: {
+          attempt: number
+          company_id: string
+          completed_at: string | null
+          dupe_count: number
+          error_message: string | null
+          id: string
+          new_count: number
+          run_id: string
+          source: string
+          started_at: string | null
+          status: string
+        }
+        Insert: {
+          attempt?: number
+          company_id: string
+          completed_at?: string | null
+          dupe_count?: number
+          error_message?: string | null
+          id?: string
+          new_count?: number
+          run_id: string
+          source: string
+          started_at?: string | null
+          status?: string
+        }
+        Update: {
+          attempt?: number
+          company_id?: string
+          completed_at?: string | null
+          dupe_count?: number
+          error_message?: string | null
+          id?: string
+          new_count?: number
+          run_id?: string
+          source?: string
+          started_at?: string | null
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "collection_jobs_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "collection_jobs_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "collection_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       collection_runs: {
         Row: {
           clusters_updated: number
