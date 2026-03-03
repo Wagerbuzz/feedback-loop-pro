@@ -663,15 +663,26 @@ serve(async (req) => {
     // URL deduplication across all phases
     const scrapedUrls = new Set<string>();
 
-    // ===== Phase 0: Direct Review Site Scraping =====
+    // ===== Phase 0: Direct Review Site Scraping (15s cap) =====
     if (collectionSources.includes("web")) {
-      console.log("Starting direct review scraping phase...");
-      const directResult = await collectDirectReviews(company, brandTerms, supabase, company_id, LOVABLE_API_KEY, FIRECRAWL_API_KEY, scrapedUrls);
+      console.log("Starting direct review scraping phase (15s cap)...");
+      const PHASE0_BUDGET_MS = 15000;
+      const directPromise = collectDirectReviews(company, brandTerms, supabase, company_id, LOVABLE_API_KEY, FIRECRAWL_API_KEY, scrapedUrls);
+      const timeoutPromise = new Promise<{ newCount: number; dupeCount: number; texts: string[] }>((resolve) =>
+        setTimeout(() => {
+          console.log("Phase 0 timed out at 15s, moving on");
+          resolve({ newCount: 0, dupeCount: 0, texts: [] });
+        }, PHASE0_BUDGET_MS)
+      );
+      const directResult = await Promise.race([directPromise, timeoutPromise]);
       totalNew += directResult.newCount;
       totalDuplicates += directResult.dupeCount;
       allFeedbackTexts.push(...directResult.texts);
       console.log(`Direct review phase complete (elapsed: ${Date.now() - startTime}ms)`);
     }
+
+    // Reset timer so web phase gets its own independent budget
+    const webPhaseStart = Date.now();
 
     // ===== Phase 1: Firecrawl Web Search (Parallel Batched) =====
     if (collectionSources.includes("web")) {
@@ -689,7 +700,7 @@ serve(async (req) => {
             headers: { Authorization: `Bearer ${FIRECRAWL_API_KEY}`, "Content-Type": "application/json" },
             body: JSON.stringify({
               query: q.query_text,
-              limit: 15,
+              limit: 5,
               scrapeOptions: { formats: ["markdown"] },
             }),
           });
@@ -890,7 +901,7 @@ serve(async (req) => {
       const queriesToProcess = queries.slice(0, webQueryLimit);
       const batchSize = 3;
       for (let i = 0; i < queriesToProcess.length; i += batchSize) {
-        const elapsed = Date.now() - startTime;
+        const elapsed = Date.now() - webPhaseStart;
         if (elapsed > webBudgetMs) {
           console.log(`Web phase time budget exceeded (${elapsed}ms / ${webBudgetMs}ms), moving to next phase`);
           break;
