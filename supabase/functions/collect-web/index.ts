@@ -42,8 +42,18 @@ serve(async (req) => {
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+  // Save these early so the finally block can use them
+  let savedRunId: string | null = null;
+  let savedCompanyId: string | null = null;
+  let newCount = 0;
+  let dupeCount = 0;
+  let completed = false;
+
   try {
     const { run_id, company_id } = await req.json();
+    savedRunId = run_id;
+    savedCompanyId = company_id;
+
     if (!run_id || !company_id) {
       return new Response(JSON.stringify({ error: "run_id and company_id required" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -69,12 +79,9 @@ serve(async (req) => {
     const brandTerms = (company.brand_terms as string[]) || [company.name];
     const scrapedUrls = new Set<string>();
 
-    let newCount = 0;
-    let dupeCount = 0;
-
-    // 90s budget for web phase (each function gets its own timeout)
+    // 80s budget for web phase (leave 10s for cleanup before 120s Deno timeout)
     const startTime = Date.now();
-    const BUDGET_MS = 90000;
+    const BUDGET_MS = 80000;
     const webQueryLimit = 15;
 
     const processQuery = async (q: any) => {
@@ -82,12 +89,19 @@ serve(async (req) => {
       let queryDupes = 0;
 
       try {
+        if (Date.now() - startTime > BUDGET_MS) return { queryNew, queryDupes };
+
         console.log(`Searching: ${q.query_text}`);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
+
         const searchRes = await fetch("https://api.firecrawl.dev/v1/search", {
           method: "POST",
           headers: { Authorization: `Bearer ${FIRECRAWL_API_KEY}`, "Content-Type": "application/json" },
           body: JSON.stringify({ query: q.query_text, limit: 5, scrapeOptions: { formats: ["markdown"] } }),
+          signal: controller.signal,
         });
+        clearTimeout(timeout);
 
         if (!searchRes.ok) {
           console.warn(`Search failed for "${q.query_text}": ${searchRes.status}`);
@@ -239,7 +253,11 @@ serve(async (req) => {
           }
         }
       } catch (err) {
-        console.warn(`Query error for "${q.query_text}":`, err);
+        if (err instanceof DOMException && err.name === "AbortError") {
+          console.warn(`Query timeout for "${q.query_text}"`);
+        } else {
+          console.warn(`Query error for "${q.query_text}":`, err);
+        }
       }
 
       return { queryNew, queryDupes };
@@ -272,6 +290,7 @@ serve(async (req) => {
       .eq("run_id", run_id)
       .eq("source", "web");
 
+    completed = true;
     console.log(`Web collection complete: ${newCount} new, ${dupeCount} dupes`);
 
     // Check if all jobs done
@@ -282,15 +301,16 @@ serve(async (req) => {
     });
   } catch (error) {
     console.error("collect-web error:", error);
-    try {
-      const body = await req.clone().json().catch(() => null);
-      if (body?.run_id) {
-        await supabase.from("collection_jobs")
-          .update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown", completed_at: new Date().toISOString() })
-          .eq("run_id", body.run_id)
-          .eq("source", "web");
+    if (savedRunId) {
+      await supabase.from("collection_jobs")
+        .update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown", completed_at: new Date().toISOString() })
+        .eq("run_id", savedRunId)
+        .eq("source", "web").catch(() => {});
+
+      if (savedCompanyId) {
+        await checkAndFinalize(supabase, savedRunId, savedCompanyId, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY).catch(() => {});
       }
-    } catch (_) {}
+    }
     return new Response(
       JSON.stringify({ success: false, error: error instanceof Error ? error.message : "Unknown error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

@@ -29,8 +29,13 @@ serve(async (req) => {
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+  let savedRunId: string | null = null;
+  let savedCompanyId: string | null = null;
+
   try {
     const { run_id, company_id } = await req.json();
+    savedRunId = run_id;
+    savedCompanyId = company_id;
     if (!run_id || !company_id) {
       return new Response(JSON.stringify({ error: "run_id and company_id required" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -109,7 +114,10 @@ serve(async (req) => {
       try {
         console.log(`Reddit JSON API: ${endpoint.label}`);
         const res = await fetch(endpoint.url, {
-          headers: { "User-Agent": "FeedbackCollector/1.0" },
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; FeedbackCollector/1.0; +https://feedbackflow.app)",
+            "Accept": "application/json",
+          },
         });
 
         if (!res.ok) {
@@ -279,15 +287,16 @@ serve(async (req) => {
     });
   } catch (error) {
     console.error("collect-reddit error:", error);
-    try {
-      const body = await req.clone().json().catch(() => null);
-      if (body?.run_id) {
-        await supabase.from("collection_jobs")
-          .update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown", completed_at: new Date().toISOString() })
-          .eq("run_id", body.run_id)
-          .eq("source", "reddit");
+    if (savedRunId) {
+      await supabase.from("collection_jobs")
+        .update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown", completed_at: new Date().toISOString() })
+        .eq("run_id", savedRunId)
+        .eq("source", "reddit").catch(() => {});
+
+      if (savedCompanyId) {
+        await checkAndFinalize(supabase, savedRunId, savedCompanyId, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY).catch(() => {});
       }
-    } catch (_) {}
+    }
     return new Response(
       JSON.stringify({ success: false, error: error instanceof Error ? error.message : "Unknown error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
