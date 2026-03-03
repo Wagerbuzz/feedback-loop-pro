@@ -9,7 +9,8 @@ export async function profileBrand(companyName: string, domain: string) {
 }
 
 export async function collectFeedback(companyId: string) {
-  const { data, error } = await supabase.functions.invoke('collect-feedback', {
+  // Use the new queue-based orchestrator
+  const { data, error } = await supabase.functions.invoke('collect-orchestrator', {
     body: { company_id: companyId },
   });
   if (error) throw new Error(error.message);
