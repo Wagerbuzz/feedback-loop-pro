@@ -1,135 +1,107 @@
 
 
-# Improve Web Search Source Discovery
+# Make Discovery Engine Comprehensive for Any Brand
 
-## Problem
+## Problems Found
 
-The web search phase is bad at finding new, unexpected sources (blogs, Substacks, newsletters, community forums, YouTube comments, podcasts) because:
+1. **Phase 0 has no time cap** -- direct review scraping runs uncapped and can consume the entire 55s budget, causing web search (Phase 1) to get zero time. The budget check at line 894 uses `startTime` which includes Phase 0 duration.
 
-1. **~75% of queries are locked to known sites** via `site:reddit.com`, `site:g2.com`, `site:trustradius.com` constraints in brand-profile query generation. Only open-web queries can discover new sources.
-2. **Hard brand-mention pre-filter** on line 533 of collect-feedback discards pages before AI extraction if the scraped text doesn't literally contain the brand name. Many blog posts, newsletters, and forum threads reference the product in titles/headers but not body text.
-3. **No discovery-oriented query templates** - queries like "{brand} blog review", "{brand} newsletter", "{brand} podcast mention" don't exist.
-4. **Sequential requests with 1s delay** between each query (line 667) wastes time budget.
+2. **No query disambiguation** -- queries like "Clay review blog" return pottery results. The brand name is used raw without any industry/product context to help search engines understand which "Clay" we mean.
 
-## Solution
+3. **Too many results per query** -- `limit: 15` on line 692 means each Firecrawl search returns 15 results, but most are irrelevant tail results. This wastes time on AI extraction for low-quality pages when we could process more distinct queries instead.
 
-### 1. Restructure query generation for discovery (brand-profile)
+4. **Weak product_terms extraction** -- the brand-profile prompt says "Specific product names" but doesn't guide the AI to extract sub-features, modules, or named capabilities (e.g., "Claygent", "Waterfall Enrichment"). Empty product_terms means fewer relevance signals.
 
-Split queries into two categories:
-- **Targeted queries** (~40%): Use specific `site:` constraints for known high-value platforms (Capterra, ProductHunt, HackerNews) that aren't already covered by direct phases
-- **Discovery queries** (~60%): Open web with no `site:` constraint, using diverse templates designed to surface blogs, newsletters, community posts
+5. **No domain-based queries** -- the domain (e.g., `clay.com`) is unambiguous but never used in search queries. A query like `"clay.com review"` would bypass common-name problems entirely.
 
-Add new discovery-oriented intent buckets:
+## Changes
 
-```text
-Existing (keep):
-  pain: "{brand} frustrating", "{brand} issues"
-  churn: "{brand} switching from", "left {brand} for"
-  comparison: "{brand} vs", "{brand} compared to"
-  pricing: "{brand} pricing", "{brand} expensive"
-  feature_experience: "{brand} {feature} experience"
-  praise: "{brand} love", "{brand} recommend"
+### 1. Cap Phase 0 at 15 seconds (`collect-feedback/index.ts`)
 
-New discovery buckets:
-  blog_review: "{brand} review blog", "{brand} honest review", "{brand} deep dive"
-  newsletter: "{brand} newsletter review", "{brand} substack", "{brand} analysis"
-  community: "{brand} forum discussion", "{brand} community feedback", "{brand} user experience"
-  video: "{brand} review youtube", "{brand} walkthrough"
-  case_study: "{brand} case study", "using {brand} for", "{brand} workflow"
-```
-
-Change domain constraints from random to deterministic:
-- Remove `site:reddit.com` (has dedicated phase)
-- Remove `site:g2.com` and `site:trustradius.com` (will be handled by direct scraping)
-- New constraints cycle: `["site:capterra.com", "site:producthunt.com", "site:news.ycombinator.com", ""]`
-- Ensure at least 60% of queries have no site constraint (open discovery)
-
-Increase query cap from 20 to 25.
-
-### 2. Replace hard brand filter with soft scoring (collect-feedback)
-
-Currently line 533 does:
-```typescript
-if (!hasBrandMention) continue; // Hard skip - kills discovery
-```
-
-Replace with a soft relevance check that allows pages through if they have contextual signals of relevance:
-
-```typescript
-const hasBrandMention = brandTerms.some(t => lowerContent.includes(t.toLowerCase()));
-const hasProductMention = (company.product_terms || []).some(t => lowerContent.includes(t.toLowerCase()));
-const hasDomainMention = company.domain && lowerContent.includes(company.domain.toLowerCase());
-const urlMentionsBrand = brandTerms.some(t => urlLower.includes(t.toLowerCase()));
-
-// Allow page if ANY relevance signal is present
-const isRelevant = hasBrandMention || hasProductMention || hasDomainMention || urlMentionsBrand;
-if (!isRelevant) continue;
-```
-
-This means a blog post at `myblog.com/airops-review` passes even if the body text uses "the platform" instead of repeating "AirOps". Product term mentions (e.g., "workflow builder") and domain mentions also qualify.
-
-### 3. Parallelize web search requests
-
-Replace the sequential loop with batched parallel processing:
+Wrap `collectDirectReviews` in a `Promise.race` with a 15s timeout so it can never starve later phases. Reset the web phase timer after Phase 0 completes so Phase 1 always gets its full budget.
 
 ```text
-Before:
-  Query 1 -> 1s wait -> Query 2 -> 1s wait -> Query 3 -> ...
-  ~3s per query = ~13 queries in 40s
-
-After:
-  [Query 1, Query 2, Query 3] -> [Query 4, Query 5, Query 6] -> ...
-  ~3s per batch of 3 = ~39 queries worth in 40s (capped at 25)
+Phase 0: max 15s (timeout race)
+Phase 1: fresh timer, full 40s budget starting AFTER Phase 0
 ```
 
-- Process 3 queries concurrently using `Promise.allSettled`
-- Remove the 1s inter-query delay (line 667)
-- Check time budget after each batch, not each query
+### 2. Add disambiguation to queries (`brand-profile/index.ts`)
 
-### 4. Add URL deduplication within a run
+Build a `disambiguator` from `industry_type` (e.g., "CRM", "GTM", "SEO tool") and append it to all discovery query templates:
 
-Track all scraped URLs in a `Set<string>` across all phases (direct scraping, web search, Reddit) to avoid processing the same page twice when it appears in multiple query results.
+```text
+Before: "{brand} review blog"
+After:  "{brand} CRM review blog"
+```
+
+For targeted queries with `site:` constraints, disambiguation is optional since the site already narrows results.
+
+### 3. Add domain-based query bucket (`brand-profile/index.ts`)
+
+New discovery bucket that uses the domain instead of the brand name:
+
+```text
+domain_search: ["{domain} review", "{domain} feedback", "{domain} alternative"]
+```
+
+These queries are completely unambiguous regardless of brand name commonality.
+
+### 4. Reduce search limit from 15 to 5 (`collect-feedback/index.ts`)
+
+Change `limit: 15` to `limit: 5` on the Firecrawl search call. This processes more distinct queries within the time budget since fewer results per query means faster AI extraction cycles.
+
+### 5. Improve product_terms extraction (`brand-profile/index.ts`)
+
+Update the `product_terms` schema description to explicitly ask for sub-products, modules, and named features:
+
+```text
+Before: "Specific product names (e.g. 'Atlas', 'Compass', 'Realm')"
+After:  "Specific product names, sub-products, modules, and named features 
+         (e.g. 'Atlas', 'Compass', 'Claygent', 'Waterfall Enrichment', 'Chrome Extension')"
+```
+
+Also add a line to the user prompt: "Look for named features, modules, and sub-products even if they aren't separate products."
 
 ## Technical Details
 
-### File: `supabase/functions/brand-profile/index.ts`
-
-**Query generation overhaul** (lines 116-145):
-
-- Add new intent buckets for blog/newsletter/community/video/case_study discovery
-- Replace `domainConstraints` with deterministic cycling that prioritizes open web
-- Use index-based cycling (`index % constraints.length`) instead of `Math.random()`
-- Increase cap from 20 to 25 queries
-- Ensure discovery buckets always use open web (no `site:` constraint)
-
 ### File: `supabase/functions/collect-feedback/index.ts`
 
-**Soft relevance filter** (replace line 530-533):
-- Check brand terms, product terms, domain, and URL for relevance signals
-- Only skip if none of these signals are present
-- Pass a `pageRelevanceContext` string to the AI prompt so it knows what signal matched
+**Phase 0 timeout** (lines 666-674):
+- Wrap `collectDirectReviews(...)` in `Promise.race` with a 15s timeout
+- After Phase 0, create a new `webPhaseStart = Date.now()` and use it for Phase 1 budget checks instead of `startTime`
 
-**Parallel batching** (replace lines 487-671):
-- Wrap query processing in a `processQuery` helper function
-- Batch queries in groups of 3 using `Promise.allSettled`
-- Remove `await new Promise(r => setTimeout(r, 1000))` delay
-- Add `scrapedUrls: Set<string>` tracking, skip URLs already seen
+**Search limit** (line 692):
+- Change `limit: 15` to `limit: 5`
 
-**Enhanced AI prompt** (line 549):
-- Add instruction: "This page was found via a web search for feedback about {company}. Even if it's a blog post or newsletter that discusses the product indirectly, extract any user opinions or experiences mentioned."
+**Web phase budget** (line 894):
+- Replace `Date.now() - startTime` with `Date.now() - webPhaseStart` so Phase 1 gets its own independent budget window
+
+### File: `supabase/functions/brand-profile/index.ts`
+
+**Product terms schema** (line 73):
+- Update description to include sub-products, modules, named features with examples
+
+**Query disambiguation** (lines 140-174):
+- After extracting profile, build `disambiguator` from `industry_type` (take first 2 words)
+- Append disambiguator to discovery bucket templates
+- Add new `domain_search` bucket with domain-based templates
+- Keep targeted bucket templates unchanged (site constraints handle disambiguation)
+
+**AI prompt** (line 53):
+- Add instruction: "Look for named features, modules, and sub-products even if they aren't standalone products."
 
 ## Files Changed
 
 | File | Change |
 |---|---|
-| `supabase/functions/brand-profile/index.ts` | Add discovery query templates, fix domain constraints, deterministic cycling, increase cap to 25 |
-| `supabase/functions/collect-feedback/index.ts` | Replace hard brand filter with soft relevance scoring, parallelize web search in batches of 3, add URL deduplication, enhance AI extraction prompt for indirect mentions |
+| `supabase/functions/collect-feedback/index.ts` | 15s Phase 0 timeout, independent web phase timer, reduce search limit to 5 |
+| `supabase/functions/brand-profile/index.ts` | Add disambiguation to discovery queries, add domain-based query bucket, improve product_terms extraction prompt |
 
 ## Expected Outcome
 
-- 60% of queries now search the open web (up from ~25%), dramatically increasing chances of finding blogs, Substacks, newsletters, and forums
-- Pages that mention the product by URL, domain, or product feature name no longer get discarded
-- 2-3x more queries processed per run via parallelization
-- New query templates specifically target blog reviews, newsletters, community discussions, and case studies
-- No duplicate processing of the same URL across phases
+- Phase 1 (web search) always gets its full 40s budget regardless of Phase 0 duration
+- Queries like "Clay CRM review blog" and "clay.com feedback" return relevant results instead of pottery
+- 3x more distinct queries processed per run (5 results each vs 15)
+- Richer product_terms give the soft relevance filter more signals to match
+- Works equally well for unique names (AirOps) and common names (Clay, Notion, Linear)
 
