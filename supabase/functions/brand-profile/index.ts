@@ -46,7 +46,7 @@ serve(async (req) => {
         messages: [
           {
             role: "system",
-            content: `You are a brand analyst. Given a company's homepage content, extract structured information about the company. Be thorough and specific.`,
+            content: `You are a brand analyst. Given a company's homepage content, extract structured information about the company. Be thorough and specific. Look for named features, modules, and sub-products even if they aren't standalone products.`,
           },
           {
             role: "user",
@@ -70,7 +70,7 @@ serve(async (req) => {
                   product_terms: {
                     type: "array",
                     items: { type: "string" },
-                    description: "Specific product names (e.g. 'Atlas', 'Compass', 'Realm')",
+                    description: "Specific product names, sub-products, modules, and named features (e.g. 'Atlas', 'Compass', 'Claygent', 'Waterfall Enrichment', 'Chrome Extension')",
                   },
                   feature_terms: {
                     type: "array",
@@ -140,10 +140,16 @@ serve(async (req) => {
     const brandName = profile.brand_terms?.[0] || company_name;
     let queryIndex = 0;
 
+    // Build disambiguator from industry_type for common-name brands
+    const disambiguator = profile.industry_type
+      ? profile.industry_type.split(/[\s\/,]+/).slice(0, 2).join(" ")
+      : "";
+    console.log(`Disambiguator: "${disambiguator}" (industry: ${profile.industry_type})`);
+
     // Add targeted queries (~40%) with deterministic site cycling
     for (const bucket of targetedBuckets) {
       for (const template of bucket.templates) {
-        if (queries.length >= 10) break; // Cap targeted at ~10
+        if (queries.length >= 10) break;
         const featureTerm = profile.feature_terms?.[Math.floor(Math.random() * (profile.feature_terms?.length || 1))] || "";
         const queryText = template.replace("{brand}", brandName).replace("{feature}", featureTerm);
         const siteConstraint = siteConstraints[queryIndex % siteConstraints.length];
@@ -158,19 +164,36 @@ serve(async (req) => {
       if (queries.length >= 10) break;
     }
 
-    // Add discovery queries (~60%) - always open web, no site constraint
+    // Add discovery queries with disambiguation - always open web, no site constraint
     for (const bucket of discoveryBuckets) {
       for (const template of bucket.templates) {
-        if (queries.length >= 25) break;
+        if (queries.length >= 22) break;
         const featureTerm = profile.feature_terms?.[Math.floor(Math.random() * (profile.feature_terms?.length || 1))] || "";
-        const queryText = template.replace("{brand}", brandName).replace("{feature}", featureTerm);
+        const baseQuery = template.replace("{brand}", brandName).replace("{feature}", featureTerm);
+        // Append disambiguator for discovery queries to avoid common-name pollution
+        const queryText = disambiguator ? `${baseQuery} ${disambiguator}` : baseQuery;
         queries.push({
           query_text: queryText,
           intent_bucket: bucket.intent,
           domain_target: "web",
         });
       }
+      if (queries.length >= 22) break;
+    }
+
+    // Add domain-based queries - completely unambiguous regardless of brand name
+    const domainBucket = [
+      `${domain} review`,
+      `${domain} feedback`,
+      `${domain} alternative`,
+    ];
+    for (const queryText of domainBucket) {
       if (queries.length >= 25) break;
+      queries.push({
+        query_text: queryText,
+        intent_bucket: "domain_search",
+        domain_target: "web",
+      });
     }
 
     const result = {
