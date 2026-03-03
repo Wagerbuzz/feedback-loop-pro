@@ -37,6 +37,12 @@ function getSourceFromUrl(url: string): string {
   return "Web";
 }
 
+function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 20000): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timeout));
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -53,8 +59,16 @@ serve(async (req) => {
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+  let savedRunId: string | null = null;
+  let savedCompanyId: string | null = null;
+  let newCount = 0;
+  let dupeCount = 0;
+
   try {
     const { run_id, company_id } = await req.json();
+    savedRunId = run_id;
+    savedCompanyId = company_id;
+
     if (!run_id || !company_id) {
       return new Response(JSON.stringify({ error: "run_id and company_id required" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -81,7 +95,7 @@ serve(async (req) => {
     const brandName = brandTerms[0] || company.name;
     const brandSlug = brandName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 
-    // Build review URLs using persisted URLs or slug fallback
+    // Build review URLs
     const reviewUrls: { url: string; source: string }[] = [];
 
     if (typedCompany.g2_url) {
@@ -111,19 +125,16 @@ serve(async (req) => {
 
     console.log(`Direct review scraping: ${reviewUrls.length} URLs for "${brandName}"`);
 
-    let newCount = 0;
-    let dupeCount = 0;
-
-    // Scrape all review URLs in parallel
+    // Scrape all review URLs in parallel with 20s timeout per request
     const scrapeResults = await Promise.allSettled(
       reviewUrls.map(async ({ url, source }) => {
         try {
           console.log(`Scraping: ${url}`);
-          const scrapeRes = await fetch("https://api.firecrawl.dev/v1/scrape", {
+          const scrapeRes = await fetchWithTimeout("https://api.firecrawl.dev/v1/scrape", {
             method: "POST",
             headers: { Authorization: `Bearer ${FIRECRAWL_API_KEY}`, "Content-Type": "application/json" },
             body: JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true }),
-          });
+          }, 20000);
           if (!scrapeRes.ok) {
             console.warn(`Scrape failed (${scrapeRes.status}): ${url}`);
             return { url, source, content: "" };
@@ -131,7 +142,11 @@ serve(async (req) => {
           const scrapeData = await scrapeRes.json();
           return { url, source, content: scrapeData?.data?.markdown || scrapeData?.markdown || "" };
         } catch (err) {
-          console.warn(`Scrape error for ${url}:`, err);
+          if (err instanceof DOMException && err.name === "AbortError") {
+            console.warn(`Scrape timeout (20s): ${url}`);
+          } else {
+            console.warn(`Scrape error for ${url}:`, err);
+          }
           return { url, source, content: "" };
         }
       })
@@ -153,7 +168,7 @@ serve(async (req) => {
 
       console.log(`Batched extraction: ${scrapedPages.length} pages, ${cappedContent.length} chars`);
 
-      const extractRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      const extractRes = await fetchWithTimeout("https://ai.gateway.lovable.dev/v1/chat/completions", {
         method: "POST",
         headers: { Authorization: `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -202,7 +217,7 @@ serve(async (req) => {
           }],
           tool_choice: { type: "function", function: { name: "extract_feedback" } },
         }),
-      });
+      }, 30000);
 
       if (extractRes.ok) {
         const extractData = await extractRes.json();
@@ -244,6 +259,8 @@ serve(async (req) => {
             }
           }
         }
+      } else {
+        console.warn(`AI extraction failed: ${extractRes.status}`);
       }
     }
 
@@ -255,7 +272,6 @@ serve(async (req) => {
 
     console.log(`Review scraping complete: ${newCount} new, ${dupeCount} dupes`);
 
-    // Check if all jobs are done and trigger clustering
     await checkAndFinalize(supabase, run_id, company_id, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
     return new Response(JSON.stringify({ success: true, new_count: newCount, dupe_count: dupeCount }), {
@@ -263,16 +279,16 @@ serve(async (req) => {
     });
   } catch (error) {
     console.error("collect-reviews error:", error);
-    // Try to mark job as failed
-    try {
-      const body = await req.clone().json().catch(() => null);
-      if (body?.run_id) {
-        await supabase.from("collection_jobs")
-          .update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown", completed_at: new Date().toISOString() })
-          .eq("run_id", body.run_id)
-          .eq("source", "review_sites");
+    if (savedRunId) {
+      await supabase.from("collection_jobs")
+        .update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown", completed_at: new Date().toISOString() })
+        .eq("run_id", savedRunId)
+        .eq("source", "review_sites").catch(() => {});
+
+      if (savedCompanyId) {
+        await checkAndFinalize(supabase, savedRunId, savedCompanyId, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY).catch(() => {});
       }
-    } catch (_) {}
+    }
     return new Response(
       JSON.stringify({ success: false, error: error instanceof Error ? error.message : "Unknown error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -285,12 +301,9 @@ async function checkAndFinalize(supabase: any, runId: string, companyId: string,
     .from("collection_jobs")
     .select("source, status")
     .eq("run_id", runId);
-
   if (!jobs) return;
-
   const nonClusterJobs = jobs.filter((j: any) => j.source !== "cluster");
   const allDone = nonClusterJobs.every((j: any) => j.status === "completed" || j.status === "failed");
-
   if (allDone) {
     console.log("All source jobs done, triggering clustering...");
     fetch(`${supabaseUrl}/functions/v1/collect-cluster`, {
