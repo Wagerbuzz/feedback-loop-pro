@@ -152,9 +152,12 @@ serve(async (req) => {
 
         console.log(`Batched extraction for "${q.query_text}": ${relevantResults.length} results, ${cappedContent.length} chars`);
 
+        const aiController = new AbortController();
+        const aiTimeout = setTimeout(() => aiController.abort(), 25000);
         const extractRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
           method: "POST",
           headers: { Authorization: `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
+          signal: aiController.signal,
           body: JSON.stringify({
             model: "google/gemini-2.5-flash-lite",
             messages: [
@@ -202,6 +205,7 @@ serve(async (req) => {
             tool_choice: { type: "function", function: { name: "extract_feedback" } },
           }),
         });
+        clearTimeout(aiTimeout);
 
         if (!extractRes.ok) {
           if (extractRes.status === 429) await new Promise((r) => setTimeout(r, 5000));
