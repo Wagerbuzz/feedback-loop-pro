@@ -170,17 +170,25 @@ async function collectDirectReviews(
     const { items } = JSON.parse(toolCall.function.arguments);
     if (!items || !Array.isArray(items)) return { newCount, dupeCount, texts };
 
-    // Determine source from URL
-    const getSource = (url: string) => {
-      const u = (url || "").toLowerCase();
-      if (u.includes("g2.com")) return "G2";
-      if (u.includes("trustradius.com")) return "TrustRadius";
-      if (u.includes("capterra.com")) return "Capterra";
-      return "Web";
-    };
+    console.log(`Direct review AI returned ${items.length} raw items`);
 
     for (const item of items) {
-      if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.6) continue;
+      if (!item.text || item.text.length < 15) {
+        console.log(`Direct review: skipped item (too short: ${item.text?.length || 0} chars)`);
+        continue;
+      }
+      if ((item.confidence || 0) < 0.5) {
+        console.log(`Direct review: skipped low-confidence item (${item.confidence}): "${item.text?.slice(0, 50)}..."`);
+        continue;
+      }
+      // Determine source from URL
+      const getSource = (url: string) => {
+        const u = (url || "").toLowerCase();
+        if (u.includes("g2.com")) return "G2";
+        if (u.includes("trustradius.com")) return "TrustRadius";
+        if (u.includes("capterra.com")) return "Capterra";
+        return "Web";
+      };
 
       const contentHash = await hashText(item.text);
       const itemUrl = item.source_url || scrapedPages[0]?.url || "";
@@ -658,6 +666,13 @@ serve(async (req) => {
       .single();
     if (compErr || !company) return errResp("Company not found", 404);
 
+    // Clean up any stuck runs for this company (older than 3 minutes)
+    await supabase.from("collection_runs")
+      .update({ status: "failed", error_message: "Timed out", completed_at: new Date().toISOString() })
+      .eq("company_id", company_id)
+      .eq("status", "running")
+      .lt("started_at", new Date(Date.now() - 180000).toISOString());
+
     // Create collection run
     const { data: run } = await supabase
       .from("collection_runs")
@@ -676,10 +691,10 @@ serve(async (req) => {
 
     // Time budget management
     const startTime = Date.now();
-    const HARD_WALL_MS = 90000; // 90s hard wall (leave 30s margin before Deno 120s timeout)
+    const HARD_WALL_MS = 70000; // 70s hard wall (leave 50s for Reddit/Twitter/clustering/save)
     const hasMultipleSources = collectionSources.length > 1;
-    const webQueryLimit = hasMultipleSources ? 20 : 25;
-    const webBudgetMs = hasMultipleSources ? 40000 : 50000;
+    const webQueryLimit = hasMultipleSources ? 15 : 20;
+    const webBudgetMs = hasMultipleSources ? 30000 : 40000;
 
     console.log(`Starting collection for ${company.name} with ${queries.length} queries (limit: ${webQueryLimit}), sources: ${collectionSources.join(", ")}`);
 
@@ -876,13 +891,15 @@ serve(async (req) => {
             const { items } = JSON.parse(toolCall.function.arguments);
             if (!items || !Array.isArray(items)) return { queryNew, queryDupes, queryTexts };
 
+            console.log(`Web AI returned ${items.length} raw items for "${q.query_text}"`);
+
             for (const item of items) {
-              if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.7) continue;
+              if (!item.text || item.text.length < 15 || (item.confidence || 0) < 0.6) continue;
 
               const feedbackLower = item.text.toLowerCase();
               const mentionsBrand = brandTerms.some((t: string) => feedbackLower.includes(t.toLowerCase()));
-              if (!mentionsBrand && (item.confidence || 0) < 0.8) {
-                console.log(`Skipping feedback not mentioning brand: "${item.text.slice(0, 60)}..."`);
+              if (!mentionsBrand && (item.confidence || 0) < 0.75) {
+                console.log(`Skipping feedback not mentioning brand (conf=${item.confidence}): "${item.text.slice(0, 60)}..."`);
                 continue;
               }
 
@@ -1107,6 +1124,16 @@ serve(async (req) => {
     });
   } catch (error) {
     console.error("collect-feedback error:", error);
+    // Try to mark the run as failed
+    try {
+      const { company_id } = await req.clone().json().catch(() => ({}));
+      if (company_id) {
+        await supabase.from("collection_runs")
+          .update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown error", completed_at: new Date().toISOString() })
+          .eq("company_id", company_id)
+          .eq("status", "running");
+      }
+    } catch (_) { /* best effort */ }
     return new Response(
       JSON.stringify({ success: false, error: error instanceof Error ? error.message : "Unknown error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
