@@ -65,30 +65,30 @@ serve(async (req) => {
                   brand_terms: {
                     type: "array",
                     items: { type: "string" },
-                    description: "Key brand names, trademarks, and variations (e.g. 'MongoDB', 'Mongo', 'Atlas')",
+                    description: "Key brand names, trademarks, and variations",
                   },
                   product_terms: {
                     type: "array",
                     items: { type: "string" },
-                    description: "Specific product names, sub-products, modules, and named features (e.g. 'Atlas', 'Compass', 'Claygent', 'Waterfall Enrichment', 'Chrome Extension')",
+                    description: "Specific product names, sub-products, modules, and named features",
                   },
                   feature_terms: {
                     type: "array",
                     items: { type: "string" },
-                    description: "Key feature keywords (e.g. 'aggregation pipeline', 'sharding', 'replication')",
+                    description: "Key feature keywords",
                   },
                   industry_type: {
                     type: "string",
-                    description: "Industry category (e.g. 'Database', 'Cloud Infrastructure', 'SaaS')",
+                    description: "Industry category",
                   },
                   persona_type: {
                     type: "string",
-                    description: "Primary user persona (e.g. 'developer', 'data engineer', 'enterprise admin')",
+                    description: "Primary user persona",
                   },
                   reddit_subreddits: {
                     type: "array",
                     items: { type: "string" },
-                    description: "Relevant subreddit names (without r/) where users discuss this product (e.g. 'mongodb', 'database', 'devops')",
+                    description: "Relevant subreddit names (without r/) where users discuss this product",
                   },
                 },
                 required: ["brand_terms", "product_terms", "feature_terms", "industry_type", "persona_type", "reddit_subreddits"],
@@ -114,7 +114,6 @@ serve(async (req) => {
     const profile = JSON.parse(toolCall.function.arguments);
 
     // Step 3: Generate search queries
-    // Targeted buckets use site constraints; discovery buckets always use open web
     const targetedBuckets = [
       { intent: "pain", templates: ["{brand} frustrating", "{brand} issues", "{brand} problems"] },
       { intent: "churn", templates: ["{brand} switching from", "{brand} alternative", "left {brand} for"] },
@@ -132,21 +131,17 @@ serve(async (req) => {
       { intent: "case_study", templates: ["{brand} case study", "using {brand} for", "{brand} workflow"] },
     ];
 
-    // Deterministic site constraints for targeted queries only
-    // Removed reddit (has dedicated phase), g2/trustradius (handled by direct scraping)
     const siteConstraints = ["site:capterra.com", "site:producthunt.com", "site:news.ycombinator.com", ""];
     const queries: Array<{ query_text: string; intent_bucket: string; domain_target: string }> = [];
 
     const brandName = profile.brand_terms?.[0] || company_name;
     let queryIndex = 0;
 
-    // Build disambiguator from industry_type for common-name brands
     const disambiguator = profile.industry_type
       ? profile.industry_type.split(/[\s\/,]+/).slice(0, 2).join(" ")
       : "";
     console.log(`Disambiguator: "${disambiguator}" (industry: ${profile.industry_type})`);
 
-    // Add targeted queries (~40%) with deterministic site cycling
     for (const bucket of targetedBuckets) {
       for (const template of bucket.templates) {
         if (queries.length >= 10) break;
@@ -164,13 +159,11 @@ serve(async (req) => {
       if (queries.length >= 10) break;
     }
 
-    // Add discovery queries with disambiguation - always open web, no site constraint
     for (const bucket of discoveryBuckets) {
       for (const template of bucket.templates) {
         if (queries.length >= 22) break;
         const featureTerm = profile.feature_terms?.[Math.floor(Math.random() * (profile.feature_terms?.length || 1))] || "";
         const baseQuery = template.replace("{brand}", brandName).replace("{feature}", featureTerm);
-        // Append disambiguator for discovery queries to avoid common-name pollution
         const queryText = disambiguator ? `${baseQuery} ${disambiguator}` : baseQuery;
         queries.push({
           query_text: queryText,
@@ -181,7 +174,6 @@ serve(async (req) => {
       if (queries.length >= 22) break;
     }
 
-    // Add domain-based queries - completely unambiguous regardless of brand name
     const domainBucket = [
       `${domain} review`,
       `${domain} feedback`,
@@ -204,6 +196,8 @@ serve(async (req) => {
       persona_type: profile.persona_type,
       reddit_subreddits: profile.reddit_subreddits || [],
       search_queries: queries,
+      // Signal to the frontend to trigger review URL lookup after company is created
+      should_lookup_review_urls: true,
     };
 
     console.log(`Brand profile extracted: ${profile.brand_terms?.length} brand terms, ${queries.length} queries`);

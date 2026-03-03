@@ -15,3 +15,11 @@ export async function collectFeedback(companyId: string) {
   if (error) throw new Error(error.message);
   return data;
 }
+
+export async function lookupReviewUrls(companyId: string) {
+  const { data, error } = await supabase.functions.invoke('lookup-review-urls', {
+    body: { company_id: companyId },
+  });
+  if (error) throw new Error(error.message);
+  return data;
+}

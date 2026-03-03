@@ -7,6 +7,29 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+// ---------- Types ----------
+interface CompanyRow {
+  id: string;
+  name: string;
+  domain: string;
+  brand_terms: string[] | null;
+  product_terms: string[] | null;
+  feature_terms: string[] | null;
+  industry_type: string | null;
+  persona_type: string | null;
+  search_queries: any[] | null;
+  collection_sources: string[] | null;
+  reddit_subreddits: string[] | null;
+  reddit_min_score: number | null;
+  reddit_max_age_days: number | null;
+  g2_url: string | null;
+  capterra_url: string | null;
+  trustradius_url: string | null;
+  getapp_url: string | null;
+  last_collected_at: string | null;
+}
+
+// ---------- Helpers ----------
 async function hashText(text: string): Promise<string> {
   const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
   const data = new TextEncoder().encode(normalized);
@@ -14,9 +37,21 @@ async function hashText(text: string): Promise<string> {
   return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Direct review site scraping - construct known review URLs and scrape them directly
+function getSourceFromUrl(url: string): string {
+  const u = (url || "").toLowerCase();
+  if (u.includes("g2.com")) return "G2";
+  if (u.includes("trustradius.com")) return "TrustRadius";
+  if (u.includes("capterra.com")) return "Capterra";
+  if (u.includes("getapp.com")) return "GetApp";
+  if (u.includes("reddit.com")) return "Reddit";
+  if (u.includes("producthunt.com")) return "ProductHunt";
+  if (u.includes("news.ycombinator.com")) return "HackerNews";
+  return "Web";
+}
+
+// ---------- Phase 0: Direct Review Site Scraping ----------
 async function collectDirectReviews(
-  company: any,
+  company: CompanyRow,
   brandTerms: string[],
   supabaseClient: any,
   companyId: string,
@@ -31,25 +66,43 @@ async function collectDirectReviews(
   const brandName = brandTerms[0] || company.name;
   const brandSlug = brandName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 
-  // Construct known review page URLs
-  const reviewUrls = [
-    { url: `https://www.g2.com/products/${brandSlug}/reviews`, source: "G2" },
-    { url: `https://www.g2.com/products/${brandSlug}/reviews?page=2`, source: "G2" },
-    { url: `https://www.trustradius.com/products/${brandSlug}/reviews`, source: "TrustRadius" },
-    { url: `https://www.capterra.com/reviews/${brandSlug}`, source: "Capterra" },
-    { url: `https://www.capterra.com/p/${brandSlug}/reviews`, source: "Capterra" },
-  ];
+  // Use persisted URLs when available, fall back to slug construction
+  const reviewUrls: { url: string; source: string }[] = [];
 
-  console.log(`Direct review scraping: ${reviewUrls.length} URLs for "${brandName}" (slug: ${brandSlug})`);
+  if (company.g2_url) {
+    reviewUrls.push({ url: company.g2_url, source: "G2" });
+    // Also try page 2
+    const page2 = company.g2_url.includes("?") ? `${company.g2_url}&page=2` : `${company.g2_url}?page=2`;
+    reviewUrls.push({ url: page2, source: "G2" });
+  } else {
+    reviewUrls.push({ url: `https://www.g2.com/products/${brandSlug}/reviews`, source: "G2" });
+    reviewUrls.push({ url: `https://www.g2.com/products/${brandSlug}/reviews?page=2`, source: "G2" });
+  }
 
-  // Scrape all review URLs in parallel (they're independent)
+  if (company.trustradius_url) {
+    reviewUrls.push({ url: company.trustradius_url, source: "TrustRadius" });
+  } else {
+    reviewUrls.push({ url: `https://www.trustradius.com/products/${brandSlug}/reviews`, source: "TrustRadius" });
+  }
+
+  if (company.capterra_url) {
+    reviewUrls.push({ url: company.capterra_url, source: "Capterra" });
+  } else {
+    reviewUrls.push({ url: `https://www.capterra.com/reviews/${brandSlug}`, source: "Capterra" });
+    reviewUrls.push({ url: `https://www.capterra.com/p/${brandSlug}/reviews`, source: "Capterra" });
+  }
+
+  if (company.getapp_url) {
+    reviewUrls.push({ url: company.getapp_url, source: "GetApp" });
+  }
+
+  console.log(`Direct review scraping: ${reviewUrls.length} URLs for "${brandName}"`);
+
+  // Scrape all review URLs in parallel
   const scrapeResults = await Promise.allSettled(
     reviewUrls.map(async ({ url, source }) => {
       const urlLower = url.toLowerCase();
-      if (scrapedUrls.has(urlLower)) {
-        console.log(`Direct scrape: skipping duplicate URL: ${url}`);
-        return { url, source, content: "", skipped: true };
-      }
+      if (scrapedUrls.has(urlLower)) return { url, source, content: "", skipped: true };
       scrapedUrls.add(urlLower);
 
       try {
@@ -75,7 +128,6 @@ async function collectDirectReviews(
     })
   );
 
-  // Collect all scraped pages with content for batched AI extraction
   const scrapedPages: { url: string; source: string; content: string }[] = [];
   for (const result of scrapeResults) {
     if (result.status !== "fulfilled") continue;
@@ -89,7 +141,6 @@ async function collectDirectReviews(
     return { newCount, dupeCount, texts };
   }
 
-  // Batch all pages into a single AI call
   const combinedContent = scrapedPages
     .map((p, i) => `--- REVIEW PAGE ${i + 1}: ${p.source} (${p.url}) ---\n${p.content}`)
     .join("\n\n");
@@ -181,21 +232,13 @@ async function collectDirectReviews(
         console.log(`Direct review: skipped low-confidence item (${item.confidence}): "${item.text?.slice(0, 50)}..."`);
         continue;
       }
-      // Determine source from URL
-      const getSource = (url: string) => {
-        const u = (url || "").toLowerCase();
-        if (u.includes("g2.com")) return "G2";
-        if (u.includes("trustradius.com")) return "TrustRadius";
-        if (u.includes("capterra.com")) return "Capterra";
-        return "Web";
-      };
 
       const contentHash = await hashText(item.text);
       const itemUrl = item.source_url || scrapedPages[0]?.url || "";
-      const source = getSource(itemUrl);
+      const source = getSourceFromUrl(itemUrl);
 
       const feedbackRow = {
-        feedback_id: `DIR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        feedback_id: crypto.randomUUID(),
         text: item.text.slice(0, 500),
         customer_name: item.author || "Anonymous",
         source,
@@ -229,29 +272,32 @@ async function collectDirectReviews(
   return { newCount, dupeCount, texts };
 }
 
-// Reddit collection via Firecrawl search (direct Reddit API is blocked with 403)
+// ---------- Phase 2: Reddit Collection via Native JSON API ----------
 async function collectRedditFeedback(
-  company: any,
+  company: CompanyRow,
   brandTerms: string[],
   supabaseClient: any,
   companyId: string,
-  lovableApiKey: string,
-  firecrawlApiKey: string
+  lovableApiKey: string
 ): Promise<{ newCount: number; dupeCount: number; texts: string[] }> {
   let newCount = 0;
   let dupeCount = 0;
   const texts: string[] = [];
 
-  const collectionSources = (company.collection_sources as string[]) || ["web", "reddit"];
+  const collectionSources = company.collection_sources || ["web", "reddit"];
   if (!collectionSources.includes("reddit")) {
     console.log("Reddit collection disabled for this company");
     return { newCount, dupeCount, texts };
   }
 
   const brandName = brandTerms[0] || company.name;
+  const minScore = company.reddit_min_score ?? 5;
+  const maxAgeDays = company.reddit_max_age_days ?? 90;
+  const cutoffTimestamp = Math.floor(Date.now() / 1000) - maxAgeDays * 86400;
+
   let subreddits = (company.reddit_subreddits as string[]) || [];
 
-  // Fallback subreddits based on industry_type if none configured
+  // Fallback subreddits based on industry_type
   if (subreddits.length === 0 && company.industry_type) {
     const INDUSTRY_SUBREDDITS: Record<string, string[]> = {
       "SEO": ["SEO", "bigseo", "digital_marketing"],
@@ -268,7 +314,7 @@ async function collectRedditFeedback(
       "HR": ["humanresources", "recruiting", "jobs"],
     };
     const industryKey = Object.keys(INDUSTRY_SUBREDDITS).find(
-      (k) => company.industry_type.toLowerCase().includes(k.toLowerCase())
+      (k) => (company.industry_type || "").toLowerCase().includes(k.toLowerCase())
     );
     if (industryKey) {
       subreddits = INDUSTRY_SUBREDDITS[industryKey];
@@ -276,156 +322,202 @@ async function collectRedditFeedback(
     }
   }
 
-  // Build Firecrawl search queries targeting Reddit
-  const redditQueries: string[] = [
-    `${brandName} site:reddit.com`,
+  // Build Reddit JSON API queries
+  const redditEndpoints: { url: string; label: string }[] = [
+    {
+      url: `https://www.reddit.com/search.json?q=${encodeURIComponent(brandName)}&type=link&sort=new&limit=25`,
+      label: `cross-reddit search: "${brandName}"`,
+    },
   ];
   for (const sub of subreddits.slice(0, 4)) {
-    redditQueries.push(`${brandName} site:reddit.com/r/${sub}`);
+    redditEndpoints.push({
+      url: `https://www.reddit.com/r/${sub}/search.json?q=${encodeURIComponent(brandName)}&restrict_sr=1&sort=top&limit=25`,
+      label: `r/${sub}: "${brandName}"`,
+    });
   }
 
-  for (const query of redditQueries) {
+  // Collect all qualifying posts across all endpoints
+  const allPosts: { title: string; selftext: string; author: string; score: number; url: string; permalink: string }[] = [];
+  const seenPostIds = new Set<string>();
+
+  for (const endpoint of redditEndpoints) {
     try {
-      console.log(`Reddit via Firecrawl: ${query}`);
-      const searchRes = await fetch("https://api.firecrawl.dev/v1/search", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${firecrawlApiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query,
-          limit: 5,
-          scrapeOptions: { formats: ["markdown"] },
-        }),
+      console.log(`Reddit JSON API: ${endpoint.label}`);
+      const res = await fetch(endpoint.url, {
+        headers: { "User-Agent": "FeedbackCollector/1.0" },
       });
 
-      if (!searchRes.ok) {
-        console.warn(`Reddit Firecrawl search failed: ${searchRes.status} for "${query}"`);
+      if (!res.ok) {
+        console.warn(`Reddit API failed (${res.status}) for ${endpoint.label}`);
+        if (res.status === 429) await new Promise((r) => setTimeout(r, 3000));
         continue;
       }
 
-      const searchData = await searchRes.json();
-      const results = searchData?.data || [];
-      console.log(`Reddit Firecrawl: ${results.length} results for "${query}"`);
+      const data = await res.json();
+      const children = data?.data?.children || [];
+      console.log(`Reddit: ${children.length} results from ${endpoint.label}`);
 
-      for (const result of results) {
-        const content = result.markdown || "";
-        if (content.length < 200) continue;
+      for (const child of children) {
+        const post = child.data;
+        if (!post) continue;
 
-        const url = result.url || "";
+        // Deduplicate across endpoints
+        if (seenPostIds.has(post.id)) continue;
+        seenPostIds.add(post.id);
 
-        // Extract feedback via AI
-        try {
-          const extractRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-            method: "POST",
-            headers: { Authorization: `Bearer ${lovableApiKey}`, "Content-Type": "application/json" },
-            body: JSON.stringify({
-              model: "google/gemini-2.5-flash",
-              messages: [
-                {
-                  role: "system",
-                  content: `You extract individual customer feedback items from Reddit content about ${company.name}. Extract ONLY genuine user opinions, complaints, praise, or feature requests that are DIRECTLY about ${company.name} or its products (${brandTerms.join(", ")}). Do NOT extract opinions about other products. Skip generic or off-topic comments. If the page URL or title clearly indicates this is a discussion about ${company.name}, you can extract feedback even if the text doesn't explicitly repeat the brand name.`,
-                },
-                {
-                  role: "user",
-                  content: `Extract feedback items ONLY about ${company.name} from this Reddit page:\n\nURL: ${url}\n\n${content.slice(0, 6000)}`,
-                },
-              ],
-              tools: [
-                {
-                  type: "function",
-                  function: {
-                    name: "extract_feedback",
-                    description: "Extract structured feedback items from Reddit content",
-                    parameters: {
-                      type: "object",
-                      properties: {
-                        items: {
-                          type: "array",
-                          items: {
-                            type: "object",
-                            properties: {
-                              author: { type: "string" },
-                              text: { type: "string", description: "The feedback text (50-300 chars)" },
-                              sentiment: { type: "string", enum: ["Positive", "Negative", "Neutral"] },
-                              confidence: { type: "number", description: "Confidence 0-1" },
-                              pain_point_category: {
-                                type: "string",
-                                enum: ["UX", "Pricing", "Reliability", "Performance", "Documentation", "Features", "Support", "Security", "Integration", "Other"],
-                              },
-                              intent_type: {
-                                type: "string",
-                                enum: ["praise", "bug", "feature_request", "churn_risk", "comparison", "general"],
-                              },
-                              context_excerpt: { type: "string" },
-                            },
-                            required: ["author", "text", "sentiment", "confidence", "pain_point_category", "intent_type"],
-                            additionalProperties: false,
+        // Filter by score
+        if ((post.score || 0) < minScore) continue;
+
+        // Filter by age
+        if (post.created_utc && post.created_utc < cutoffTimestamp) continue;
+
+        const selftext = post.selftext || "";
+        const title = post.title || "";
+        if (selftext.length < 30 && title.length < 30) continue;
+
+        allPosts.push({
+          title,
+          selftext: selftext.slice(0, 1500),
+          author: post.author || "Anonymous",
+          score: post.score || 0,
+          url: post.url || "",
+          permalink: post.permalink ? `https://www.reddit.com${post.permalink}` : "",
+        });
+      }
+    } catch (err) {
+      console.warn(`Reddit endpoint error for ${endpoint.label}:`, err);
+    }
+  }
+
+  console.log(`Reddit: ${allPosts.length} qualifying posts (score >= ${minScore}, age <= ${maxAgeDays}d)`);
+
+  if (allPosts.length === 0) return { newCount, dupeCount, texts };
+
+  // Batch posts into AI extraction (up to 15 posts per batch)
+  const batchSize = 15;
+  for (let i = 0; i < allPosts.length; i += batchSize) {
+    const batch = allPosts.slice(i, i + batchSize);
+    const combinedContent = batch
+      .map((p, idx) => `--- POST ${idx + 1} (score: ${p.score}, by u/${p.author}) ---\nTitle: ${p.title}\n${p.selftext}\nURL: ${p.permalink}`)
+      .join("\n\n");
+
+    try {
+      const extractRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${lovableApiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash-lite",
+          messages: [
+            {
+              role: "system",
+              content: `You extract individual customer feedback items from Reddit posts about ${company.name}. Extract ONLY genuine user opinions, complaints, praise, or feature requests that are DIRECTLY about ${company.name} or its products (${brandTerms.join(", ")}). Do NOT extract opinions about other products. Skip generic or off-topic comments. If a post title clearly indicates discussion about ${company.name}, you can extract feedback from the body.`,
+            },
+            {
+              role: "user",
+              content: `Extract feedback items ONLY about ${company.name} from these Reddit posts:\n\n${combinedContent.slice(0, 12000)}`,
+            },
+          ],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "extract_feedback",
+                description: "Extract structured feedback items from Reddit content",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    items: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          post_index: { type: "number", description: "1-based index of the post" },
+                          author: { type: "string" },
+                          text: { type: "string", description: "The feedback text (50-300 chars)" },
+                          sentiment: { type: "string", enum: ["Positive", "Negative", "Neutral"] },
+                          confidence: { type: "number", description: "Confidence 0-1" },
+                          pain_point_category: {
+                            type: "string",
+                            enum: ["UX", "Pricing", "Reliability", "Performance", "Documentation", "Features", "Support", "Security", "Integration", "Other"],
                           },
+                          intent_type: {
+                            type: "string",
+                            enum: ["praise", "bug", "feature_request", "churn_risk", "comparison", "general"],
+                          },
+                          context_excerpt: { type: "string" },
                         },
+                        required: ["post_index", "author", "text", "sentiment", "confidence", "pain_point_category", "intent_type"],
+                        additionalProperties: false,
                       },
-                      required: ["items"],
-                      additionalProperties: false,
                     },
                   },
+                  required: ["items"],
+                  additionalProperties: false,
                 },
-              ],
-              tool_choice: { type: "function", function: { name: "extract_feedback" } },
-            }),
-          });
+              },
+            },
+          ],
+          tool_choice: { type: "function", function: { name: "extract_feedback" } },
+        }),
+      });
 
-          if (!extractRes.ok) {
-            if (extractRes.status === 429) await new Promise((r) => setTimeout(r, 5000));
-            continue;
-          }
+      if (!extractRes.ok) {
+        if (extractRes.status === 429) await new Promise((r) => setTimeout(r, 5000));
+        console.warn(`Reddit AI extraction failed: ${extractRes.status}`);
+        continue;
+      }
 
-          const extractData = await extractRes.json();
-          const toolCall = extractData.choices?.[0]?.message?.tool_calls?.[0];
-          if (!toolCall) continue;
+      const extractData = await extractRes.json();
+      const toolCall = extractData.choices?.[0]?.message?.tool_calls?.[0];
+      if (!toolCall) continue;
 
-          const { items } = JSON.parse(toolCall.function.arguments);
-          if (!items || !Array.isArray(items)) continue;
+      const { items } = JSON.parse(toolCall.function.arguments);
+      if (!items || !Array.isArray(items)) continue;
 
-          for (const item of items) {
-            if (!item.text || item.text.length < 20 || (item.confidence || 0) < 0.7) continue;
+      console.log(`Reddit AI returned ${items.length} raw items for batch ${Math.floor(i / batchSize) + 1}`);
 
-            const feedbackLower = item.text.toLowerCase();
-            const mentionsBrand = brandTerms.some((t) => feedbackLower.includes(t.toLowerCase()));
-            if (!mentionsBrand && (item.confidence || 0) < 0.8) continue;
+      for (const item of items) {
+        if (!item.text || item.text.length < 15 || (item.confidence || 0) < 0.6) continue;
 
-            const contentHash = await hashText(item.text);
+        const feedbackLower = item.text.toLowerCase();
+        const mentionsBrand = brandTerms.some((t) => feedbackLower.includes(t.toLowerCase()));
+        if (!mentionsBrand && (item.confidence || 0) < 0.75) continue;
 
-            const feedbackRow = {
-              feedback_id: `RED-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-              text: item.text.slice(0, 500),
-              customer_name: item.author || "Anonymous",
-              source: "Reddit",
-              sentiment: item.sentiment || "Neutral",
-              status: "New",
-              channel: "Reddit",
-              company_id: companyId,
-              source_url: url,
-              content_hash: contentHash,
-              pain_point_category: item.pain_point_category,
-              intent_type: item.intent_type,
-              confidence_score: item.confidence || 0.5,
-              original_context_excerpt: item.context_excerpt?.slice(0, 200) || null,
-            };
+        const postIdx = (item.post_index || 1) - 1;
+        const post = batch[postIdx];
+        const postUrl = post?.permalink || "";
 
-            const { error: insertErr } = await supabaseClient.from("feedback").insert(feedbackRow);
+        const contentHash = await hashText(item.text);
 
-            if (insertErr) {
-              if (insertErr.message?.includes("idx_feedback_content_hash")) dupeCount++;
-              else console.warn("Reddit insert error:", insertErr.message);
-            } else {
-              newCount++;
-              texts.push(item.text);
-            }
-          }
-        } catch (aiErr) {
-          console.warn("Reddit AI extraction error:", aiErr);
+        const feedbackRow = {
+          feedback_id: crypto.randomUUID(),
+          text: item.text.slice(0, 500),
+          customer_name: item.author || post?.author || "Anonymous",
+          source: "Reddit",
+          sentiment: item.sentiment || "Neutral",
+          status: "New",
+          channel: "Reddit",
+          company_id: companyId,
+          source_url: postUrl,
+          content_hash: contentHash,
+          pain_point_category: item.pain_point_category,
+          intent_type: item.intent_type,
+          confidence_score: item.confidence || 0.5,
+          original_context_excerpt: item.context_excerpt?.slice(0, 200) || null,
+        };
+
+        const { error: insertErr } = await supabaseClient.from("feedback").insert(feedbackRow);
+
+        if (insertErr) {
+          if (insertErr.message?.includes("idx_feedback_content_hash")) dupeCount++;
+          else console.warn("Reddit insert error:", insertErr.message);
+        } else {
+          newCount++;
+          texts.push(item.text);
         }
       }
-    } catch (searchErr) {
-      console.warn("Reddit Firecrawl search error:", searchErr);
+    } catch (aiErr) {
+      console.warn("Reddit AI extraction error:", aiErr);
     }
   }
 
@@ -433,9 +525,9 @@ async function collectRedditFeedback(
   return { newCount, dupeCount, texts };
 }
 
-// Twitter/X API v2 collection
+// ---------- Phase 3: Twitter/X API v2 ----------
 async function collectTwitterFeedback(
-  company: any,
+  company: CompanyRow,
   brandTerms: string[],
   supabaseClient: any,
   companyId: string,
@@ -445,7 +537,7 @@ async function collectTwitterFeedback(
   let dupeCount = 0;
   const texts: string[] = [];
 
-  const collectionSources = (company.collection_sources as string[]) || ["web", "reddit"];
+  const collectionSources = company.collection_sources || ["web", "reddit"];
   if (!collectionSources.includes("twitter")) {
     console.log("Twitter collection disabled for this company");
     return { newCount, dupeCount, texts };
@@ -486,7 +578,6 @@ async function collectTwitterFeedback(
   }
 
   const brandName = brandTerms[0] || company.name;
-
   const productTerms = (company.product_terms || []).slice(0, 3);
   const industryType = company.industry_type || "";
   const contextTerms = [
@@ -517,12 +608,11 @@ async function collectTwitterFeedback(
 
     const searchData = await searchRes.json();
     const tweets = searchData?.data || [];
-
     console.log(`Twitter: found ${tweets.length} tweets`);
 
-    const batchSize = 20;
-    for (let i = 0; i < tweets.length; i += batchSize) {
-      const batch = tweets.slice(i, i + batchSize);
+    const tweetBatchSize = 20;
+    for (let i = 0; i < tweets.length; i += tweetBatchSize) {
+      const batch = tweets.slice(i, i + tweetBatchSize);
       const tweetTexts = batch.map((t: any, idx: number) => `${idx + 1}. @${t.author_id}: ${t.text}`).join("\n");
 
       const extractRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
@@ -533,7 +623,7 @@ async function collectTwitterFeedback(
           messages: [
             {
               role: "system",
-              content: `Extract customer feedback from tweets about ${company.name} (${company.domain}), a ${company.industry_type || "software"} product. Only extract tweets about THIS specific product, not other products that share the same name. Skip tweets about unrelated products, promotional tweets, ads, and bot content.`,
+              content: `Extract customer feedback from tweets about ${company.name} (${company.domain}), a ${company.industry_type || "software"} product. Only extract tweets about THIS specific product, not other products that share the same name. Skip promotional tweets, ads, and bot content.`,
             },
             { role: "user", content: `Extract feedback from these tweets about ${company.name}:\n\n${tweetTexts}` },
           ],
@@ -606,7 +696,7 @@ async function collectTwitterFeedback(
         const contentHash = await hashText(item.text);
 
         const feedbackRow = {
-          feedback_id: `TW-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          feedback_id: crypto.randomUUID(),
           text: item.text.slice(0, 500),
           customer_name: tweet ? `@${tweet.author_id}` : "Anonymous",
           source: "Twitter",
@@ -641,6 +731,7 @@ async function collectTwitterFeedback(
   return { newCount, dupeCount, texts };
 }
 
+// ---------- Main handler ----------
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -654,9 +745,14 @@ serve(async (req) => {
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+  // Save company_id early so catch block can use it
+  let savedCompanyId: string | null = null;
+  let runId: string | null = null;
+
   try {
     const { company_id } = await req.json();
     if (!company_id) return errResp("company_id required", 400);
+    savedCompanyId = company_id;
 
     // Load company
     const { data: company, error: compErr } = await supabase
@@ -679,7 +775,7 @@ serve(async (req) => {
       .insert({ company_id, status: "running" })
       .select("id")
       .single();
-    const runId = run?.id;
+    runId = run?.id || null;
 
     let totalNew = 0;
     let totalDuplicates = 0;
@@ -689,9 +785,9 @@ serve(async (req) => {
     const brandTerms = (company.brand_terms as string[]) || [company.name];
     const collectionSources = (company.collection_sources as string[]) || ["web", "reddit"];
 
-    // Time budget management
+    // Time budget: 70s hard wall leaves ~50s margin before Deno 120s timeout
     const startTime = Date.now();
-    const HARD_WALL_MS = 70000; // 70s hard wall (leave 50s for Reddit/Twitter/clustering/save)
+    const HARD_WALL_MS = 70000;
     const hasMultipleSources = collectionSources.length > 1;
     const webQueryLimit = hasMultipleSources ? 15 : 20;
     const webBudgetMs = hasMultipleSources ? 30000 : 40000;
@@ -705,7 +801,8 @@ serve(async (req) => {
     if (collectionSources.includes("web")) {
       console.log("Starting direct review scraping phase (15s cap)...");
       const PHASE0_BUDGET_MS = 15000;
-      const directPromise = collectDirectReviews(company, brandTerms, supabase, company_id, LOVABLE_API_KEY, FIRECRAWL_API_KEY, scrapedUrls);
+      const typedCompany = company as unknown as CompanyRow;
+      const directPromise = collectDirectReviews(typedCompany, brandTerms, supabase, company_id, LOVABLE_API_KEY, FIRECRAWL_API_KEY, scrapedUrls);
       const timeoutPromise = new Promise<{ newCount: number; dupeCount: number; texts: string[] }>((resolve) =>
         setTimeout(() => {
           console.log("Phase 0 timed out at 15s, moving on");
@@ -751,7 +848,6 @@ serve(async (req) => {
           const searchData = await searchRes.json();
           const results = searchData?.data || [];
 
-          // Collect relevant results for batched AI extraction
           const relevantResults: { url: string; content: string; relevanceSignals: string[] }[] = [];
 
           for (const result of results) {
@@ -761,14 +857,12 @@ serve(async (req) => {
             const url = result.url || "";
             const urlLower = url.toLowerCase();
 
-            // URL deduplication
             if (scrapedUrls.has(urlLower)) {
               console.log(`Skipping duplicate URL: ${url}`);
               continue;
             }
             scrapedUrls.add(urlLower);
 
-            // URL-level relevance filtering
             const isOtherProductPage = urlLower.includes('/products/') &&
               !brandTerms.some((t: string) => urlLower.includes(t.toLowerCase()));
             const isCategoryPage = urlLower.includes('/categories/');
@@ -777,11 +871,10 @@ serve(async (req) => {
               continue;
             }
 
-            // Soft relevance check
             const lowerContent = content.toLowerCase();
             const hasBrandMention = brandTerms.some((t: string) => lowerContent.includes(t.toLowerCase()));
-            const productTerms = (company.product_terms as string[]) || [];
-            const hasProductMention = productTerms.some((t: string) => lowerContent.includes(t.toLowerCase()));
+            const prodTerms = (company.product_terms as string[]) || [];
+            const hasProductMention = prodTerms.some((t: string) => lowerContent.includes(t.toLowerCase()));
             const hasDomainMention = company.domain ? lowerContent.includes(company.domain.toLowerCase()) : false;
             const urlMentionsBrand = brandTerms.some((t: string) => urlLower.includes(t.toLowerCase()));
 
@@ -797,7 +890,6 @@ serve(async (req) => {
             if (hasDomainMention) relevanceSignals.push("domain in content");
             if (urlMentionsBrand) relevanceSignals.push("brand name in URL");
 
-            // Filter affiliate content
             const affiliateKeywords = ["affiliate", "sponsored post", "paid partnership", "commission"];
             if (affiliateKeywords.some((k) => lowerContent.includes(k))) continue;
 
@@ -808,7 +900,6 @@ serve(async (req) => {
             return { queryNew, queryDupes, queryTexts };
           }
 
-          // Batched AI extraction: combine all relevant results into one AI call
           const combinedContent = relevantResults
             .map((r, i) => `--- SOURCE ${i + 1}: ${r.url} (relevance: ${r.relevanceSignals.join(", ")}) ---\n${r.content}`)
             .join("\n\n");
@@ -904,21 +995,12 @@ serve(async (req) => {
               }
 
               const itemUrl = item.source_url || relevantResults[0]?.url || "";
-              const urlLower = itemUrl.toLowerCase();
-
-              // Determine source from URL
-              let source = "Web";
-              if (urlLower.includes("reddit.com")) source = "Reddit";
-              else if (urlLower.includes("g2.com")) source = "G2";
-              else if (urlLower.includes("trustradius.com")) source = "TrustRadius";
-              else if (urlLower.includes("capterra.com")) source = "Capterra";
-              else if (urlLower.includes("producthunt.com")) source = "ProductHunt";
-              else if (urlLower.includes("news.ycombinator.com")) source = "HackerNews";
+              const source = getSourceFromUrl(itemUrl);
 
               const contentHash = await hashText(item.text);
 
               const feedbackRow = {
-                feedback_id: `WEB-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                feedback_id: crypto.randomUUID(),
                 text: item.text.slice(0, 500),
                 customer_name: item.author || "Anonymous",
                 source,
@@ -981,29 +1063,31 @@ serve(async (req) => {
       }
     }
 
-    // ===== Phase 2: Reddit Collection (always attempt unless past 90s wall) =====
+    // ===== Phase 2: Reddit Collection (native JSON API) =====
     console.log(`Starting Reddit collection phase... (elapsed: ${Date.now() - startTime}ms)`);
     if (Date.now() - startTime < HARD_WALL_MS) {
-      const redditResult = await collectRedditFeedback(company, brandTerms, supabase, company_id, LOVABLE_API_KEY, FIRECRAWL_API_KEY);
+      const typedCompany = company as unknown as CompanyRow;
+      const redditResult = await collectRedditFeedback(typedCompany, brandTerms, supabase, company_id, LOVABLE_API_KEY);
       totalNew += redditResult.newCount;
       totalDuplicates += redditResult.dupeCount;
       allFeedbackTexts.push(...redditResult.texts);
     } else {
-      console.log("Skipping Reddit phase - past 90s hard wall");
+      console.log("Skipping Reddit phase - past hard wall");
     }
 
-    // ===== Phase 3: Twitter/X Collection (always attempt unless past 90s wall) =====
+    // ===== Phase 3: Twitter/X Collection =====
     console.log(`Starting Twitter collection phase... (elapsed: ${Date.now() - startTime}ms)`);
     const hasBearerToken = !!Deno.env.get("TWITTER_BEARER_TOKEN");
     const hasConsumerKeys = !!Deno.env.get("TWITTER_CONSUMER_KEY") && !!Deno.env.get("TWITTER_CONSUMER_SECRET");
     console.log(`Twitter auth: bearer=${hasBearerToken}, consumer_keys=${hasConsumerKeys}`);
     if (Date.now() - startTime < HARD_WALL_MS) {
-      const twitterResult = await collectTwitterFeedback(company, brandTerms, supabase, company_id, LOVABLE_API_KEY);
+      const typedCompany = company as unknown as CompanyRow;
+      const twitterResult = await collectTwitterFeedback(typedCompany, brandTerms, supabase, company_id, LOVABLE_API_KEY);
       totalNew += twitterResult.newCount;
       totalDuplicates += twitterResult.dupeCount;
       allFeedbackTexts.push(...twitterResult.texts);
     } else {
-      console.log("Skipping Twitter phase - past 90s hard wall");
+      console.log("Skipping Twitter phase - past hard wall");
     }
 
     // ===== Clustering phase =====
@@ -1124,16 +1208,22 @@ serve(async (req) => {
     });
   } catch (error) {
     console.error("collect-feedback error:", error);
-    // Try to mark the run as failed
-    try {
-      const { company_id } = await req.clone().json().catch(() => ({}));
-      if (company_id) {
-        await supabase.from("collection_runs")
-          .update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown error", completed_at: new Date().toISOString() })
-          .eq("company_id", company_id)
-          .eq("status", "running");
-      }
-    } catch (_) { /* best effort */ }
+    // Mark the run as failed using saved company_id (no req.clone needed)
+    if (savedCompanyId) {
+      try {
+        const updateFilter: any = { status: "running" };
+        if (runId) {
+          await supabase.from("collection_runs")
+            .update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown error", completed_at: new Date().toISOString() })
+            .eq("id", runId);
+        } else {
+          await supabase.from("collection_runs")
+            .update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown error", completed_at: new Date().toISOString() })
+            .eq("company_id", savedCompanyId)
+            .eq("status", "running");
+        }
+      } catch (_) { /* best effort */ }
+    }
     return new Response(
       JSON.stringify({ success: false, error: error instanceof Error ? error.message : "Unknown error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
